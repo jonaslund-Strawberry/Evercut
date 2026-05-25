@@ -112,6 +112,22 @@
 
       const generateId = () => Math.random().toString(36).substr(2, 9);
 
+      const getInterpolatedValue = (keyframes, time, defaultValue) => {
+        if (!keyframes || keyframes.length === 0) return defaultValue;
+        const sorted = [...keyframes].sort((a, b) => a.time - b.time);
+        if (time <= sorted[0].time) return sorted[0].value;
+        if (time >= sorted[sorted.length - 1].time) return sorted[sorted.length - 1].value;
+        for (let i = 0; i < sorted.length - 1; i++) {
+          const k1 = sorted[i];
+          const k2 = sorted[i + 1];
+          if (time >= k1.time && time <= k2.time) {
+            const ratio = (time - k1.time) / (k2.time - k1.time);
+            return k1.value + ratio * (k2.value - k1.value);
+          }
+        }
+        return defaultValue;
+      };
+
       function WebVideoEditor() {
         const [isPlaying, setIsPlaying] = useState(false);
         const [currentTime, setCurrentTime] = useState(0);
@@ -150,6 +166,8 @@
         const [isLibraryOpen, setIsLibraryOpen] = useState(true);
         const [activeSnapTime, setActiveSnapTime] = useState(null);
         const [exportProgress, setExportProgress] = useState(0);
+        const [isPreparingExport, setIsPreparingExport] = useState(false);
+        const [rippleMode, setRippleMode] = useState(false);
 
         const canvasRef = useRef(null);
         const previewContainerRef = useRef(null);
@@ -164,6 +182,8 @@
         const videoElementsRef = useRef({});
         const audioElementsRef = useRef({});
         const audioGainNodesRef = useRef({});
+        const audioPannerNodesRef = useRef({});
+        const canvasStreamRef = useRef(null);
         const requestRef = useRef();
         const mediaRecorderRef = useRef(null);
         const isMounted = useRef(true);
@@ -188,6 +208,7 @@
           zoomLevel: 20,
           snapping: true,
           markers: [],
+          rippleMode: false,
         });
 
         const audioContextRef = useRef(null);
@@ -241,20 +262,48 @@
           }
         };
 
-        const handleExport = async () => {
-          initAudio();
-          updateTime(locators.left);
+        const checkExportReady = () => {
+          const activeClips = [];
+          ["video1", "video2", "video3"].forEach((trackId) => {
+            const clip = stateRef.current.tracks[trackId].find(
+              (c) => stateRef.current.locators.left >= c.start && stateRef.current.locators.left < c.start + c.duration
+            );
+            if (clip && clip.type === "video") {
+              activeClips.push(clip);
+            }
+          });
 
-          const stream = canvasRef.current.captureStream(CONFIG.fps);
+          const allReady = activeClips.every((clip) => {
+            const el = videoElementsRef.current[clip.id];
+            return el ? (el.readyState >= 2 && !el.seeking) : true;
+          });
+
+          if (allReady) {
+            setIsPreparingExport(false);
+            startRecordingAfterSync();
+          } else {
+            requestAnimationFrame(checkExportReady);
+          }
+        };
+
+        const startRecordingAfterSync = () => {
+          setExportProgress(0);
+          
+          if (!canvasStreamRef.current) {
+            canvasStreamRef.current = canvasRef.current.captureStream(CONFIG.fps);
+          }
+          const stream = canvasStreamRef.current;
+          
           const audioTrack = destNodeRef.current?.stream.getAudioTracks()[0];
-          if (audioTrack) stream.addTrack(audioTrack);
+          if (audioTrack) {
+            stream.getAudioTracks().forEach((track) => stream.removeTrack(track));
+            stream.addTrack(audioTrack);
+          }
 
           const chunks = [];
           let mimeType = "video/webm; codecs=vp9";
           if (exportFormat === "mp4") {
-            if (
-              MediaRecorder.isTypeSupported("video/mp4; codecs=avc1.42E01E")
-            ) {
+            if (MediaRecorder.isTypeSupported("video/mp4; codecs=avc1.42E01E")) {
               mimeType = "video/mp4; codecs=avc1.42E01E";
             } else if (MediaRecorder.isTypeSupported("video/mp4")) {
               mimeType = "video/mp4";
@@ -270,28 +319,38 @@
               if (e.data.size > 0) chunks.push(e.data);
             };
             recorder.onstop = () => {
+              if (!stateRef.current.isRendering) {
+                return; // Export was cancelled
+              }
               const blob = new Blob(chunks, { type: mimeType.split(";")[0] });
               const url = URL.createObjectURL(blob);
               const a = document.createElement("a");
               a.href = url;
-              const ext =
-                exportFormat === "mp4" && mimeType.includes("mp4")
-                  ? "mp4"
-                  : "webm";
+              const ext = exportFormat === "mp4" && mimeType.includes("mp4") ? "mp4" : "webm";
               a.download = `render_${Date.now()}.${ext}`;
               a.click();
             };
 
             mediaRecorderRef.current = recorder;
             recorder.start();
-            setIsRendering(true);
             setIsPlaying(true);
           } catch (e) {
             setIsRendering(false);
             setIsPlaying(false);
-            console.error(e);
+            console.error("Export start failed:", e);
             alert("Export failed. Browser error.");
           }
+        };
+
+        const handleExport = async () => {
+          setExportProgress(0);
+          initAudio();
+          updateTime(locators.left);
+          setIsRendering(true);
+          setIsPreparingExport(true);
+          
+          // Poll seeking status
+          requestAnimationFrame(checkExportReady);
         };
 
         // --- History ---
@@ -354,6 +413,7 @@
           stateRef.current.zoomLevel = zoomLevel;
           stateRef.current.snapping = snapping;
           stateRef.current.markers = markers;
+          stateRef.current.rippleMode = rippleMode;
         }, [
           currentTime,
           isPlaying,
@@ -366,6 +426,7 @@
           zoomLevel,
           snapping,
           markers,
+          rippleMode,
         ]);
 
         // --- Dynamic Duration Effect ---
@@ -388,12 +449,15 @@
             const source =
               audioContextRef.current.createMediaElementSource(element);
             const clipGain = audioContextRef.current.createGain();
+            const clipPanner = audioContextRef.current.createStereoPanner();
 
             source.connect(clipGain);
-            clipGain.connect(masterGainRef.current);
+            clipGain.connect(clipPanner);
+            clipPanner.connect(masterGainRef.current);
 
             audioSourcesRef.current.set(element, source);
             audioGainNodesRef.current[id] = clipGain;
+            audioPannerNodesRef.current[id] = clipPanner;
           } catch (e) {
             console.warn("Audio connection warning:", e);
           }
@@ -434,7 +498,7 @@
 
         // --- Meter Renderer ---
         const drawMeter = useCallback(() => {
-          if (!analyserLRef.current || !analyserRRef.current || !meterCanvasRef.current) return;
+          if (!analyserLRef.current || !analyserRRef.current || !meterCanvasRef.current) return false;
 
           const canvas = meterCanvasRef.current;
           const ctx = canvas.getContext("2d");
@@ -459,6 +523,15 @@
           }
           const levelL = Math.min(1, (sumL / bufferLength) / 110);
           const levelR = Math.min(1, (sumR / bufferLength) / 110);
+
+          // PERFORMANCE OPTIMIZATION: If paused, levels are 0, and peak holds have fully decayed, skip redraw
+          if (!stateRef.current.isPlaying && 
+              levelL === 0 && 
+              levelR === 0 && 
+              peakHoldLRef.current.val === 0 && 
+              peakHoldRRef.current.val === 0) {
+            return false;
+          }
 
           // Update Peak Holds
           const now = Date.now();
@@ -523,6 +596,7 @@
               ctx.fillText(`${db}`, 4, y - 2);
             }
           });
+          return true;
         }, []);
 
         // --- Logic: Snapping ---
@@ -649,10 +723,21 @@
 
                   const gainNode = audioGainNodesRef.current[activeClip.id];
                   if (gainNode) {
-                    const finalVol = activeClip.muted ? 0 : (activeClip.volume ?? 1) * fadeOpacity;
+                    const currentVol = getInterpolatedValue(activeClip.volumeKeyframes, relativeTime, activeClip.volume ?? 1);
+                    const finalVol = activeClip.muted ? 0 : currentVol * fadeOpacity;
                     gainNode.gain.cancelScheduledValues(0);
                     gainNode.gain.setValueAtTime(
                       finalVol,
+                      audioContextRef.current?.currentTime || 0,
+                    );
+                  }
+
+                  const pannerNode = audioPannerNodesRef.current[activeClip.id];
+                  if (pannerNode) {
+                    const currentPan = getInterpolatedValue(activeClip.panKeyframes, relativeTime, 0);
+                    pannerNode.pan.cancelScheduledValues(0);
+                    pannerNode.pan.setValueAtTime(
+                      currentPan,
                       audioContextRef.current?.currentTime || 0,
                     );
                   }
@@ -730,12 +815,17 @@
                         if (filterStr !== "none") {
                           ctx.filter = filterStr;
                         }
+                        const scale = (activeClip.scale ?? 100) / 100;
+                        const clipX = ((activeClip.x !== undefined ? activeClip.x : 50) / 100) * CONFIG.width;
+                        const clipY = ((activeClip.y !== undefined ? activeClip.y : 50) / 100) * CONFIG.height;
+                        const w = CONFIG.width * scale;
+                        const h = CONFIG.height * scale;
                         ctx.drawImage(
                           videoEl,
-                          0,
-                          0,
-                          CONFIG.width,
-                          CONFIG.height,
+                          clipX - w / 2,
+                          clipY - h / 2,
+                          w,
+                          h,
                         );
                         ctx.filter = "none";
                       }
@@ -746,7 +836,18 @@
                       if (filterStr !== "none") {
                         ctx.filter = filterStr;
                       }
-                      ctx.drawImage(imgEl, 0, 0, CONFIG.width, CONFIG.height);
+                      const scale = (activeClip.scale ?? 100) / 100;
+                      const clipX = ((activeClip.x !== undefined ? activeClip.x : 50) / 100) * CONFIG.width;
+                      const clipY = ((activeClip.y !== undefined ? activeClip.y : 50) / 100) * CONFIG.height;
+                      const w = CONFIG.width * scale;
+                      const h = CONFIG.height * scale;
+                      ctx.drawImage(
+                        imgEl,
+                        clipX - w / 2,
+                        clipY - h / 2,
+                        w,
+                        h,
+                      );
                       ctx.filter = "none";
                     }
                   } else if (activeClip.type === "text") {
@@ -761,7 +862,27 @@
                     const y =
                       ((activeClip.y !== undefined ? activeClip.y : 50) / 100) *
                       CONFIG.height;
+
+                    if (activeClip.textShadow) {
+                      ctx.shadowColor = activeClip.textShadowColor || "rgba(0, 0, 0, 0.6)";
+                      ctx.shadowBlur = activeClip.textShadowBlur || 8;
+                      ctx.shadowOffsetX = 3;
+                      ctx.shadowOffsetY = 3;
+                    }
+
+                    if (activeClip.textStroke) {
+                      ctx.strokeStyle = activeClip.textStrokeColor || "#000000";
+                      ctx.lineWidth = activeClip.textStrokeWidth || 6;
+                      ctx.strokeText(activeClip.text || "Text", x, y);
+                    }
+
                     ctx.fillText(activeClip.text || "Text", x, y);
+
+                    // Reset shadow settings
+                    ctx.shadowColor = "transparent";
+                    ctx.shadowBlur = 0;
+                    ctx.shadowOffsetX = 0;
+                    ctx.shadowOffsetY = 0;
                   }
                   ctx.restore();
                 }
@@ -800,7 +921,8 @@
                       if (!el.paused) el.pause();
                     }
 
-                    let vol = activeClip.muted ? 0 : (activeClip.volume ?? 1);
+                    const currentVol = getInterpolatedValue(activeClip.volumeKeyframes, relativeTime, activeClip.volume ?? 1);
+                    let vol = activeClip.muted ? 0 : currentVol;
                     if (
                       activeClip.fadeInDuration > 0 &&
                       relativeTime < activeClip.fadeInDuration
@@ -821,6 +943,16 @@
                       Math.max(0, vol),
                       audioContextRef.current?.currentTime || 0,
                     );
+
+                    const pannerNode = audioPannerNodesRef.current[activeClip.id];
+                    if (pannerNode) {
+                      const currentPan = getInterpolatedValue(activeClip.panKeyframes, relativeTime, 0);
+                      pannerNode.pan.cancelScheduledValues(0);
+                      pannerNode.pan.setValueAtTime(
+                        currentPan,
+                        audioContextRef.current?.currentTime || 0,
+                      );
+                    }
                   }
                 }
               });
@@ -955,11 +1087,49 @@
           setSelectedClip((currentSelected) => {
             if (!currentSelected) return null;
             cleanupClipResources(currentSelected.id, currentSelected.src);
+            const trackClips = stateRef.current.tracks[currentSelected.trackId];
+            let newClips = trackClips.filter((c) => c.id !== currentSelected.id);
+
+            if (rippleMode) {
+              const deletedStart = currentSelected.start;
+              const deletedDuration = currentSelected.duration;
+              newClips = newClips.map((c) => {
+                if (c.start > deletedStart) {
+                  return { ...c, start: Math.max(0, c.start - deletedDuration) };
+                }
+                return c;
+              });
+            }
+
             const newTracks = {
               ...stateRef.current.tracks,
-              [currentSelected.trackId]: stateRef.current.tracks[
-                currentSelected.trackId
-              ].filter((c) => c.id !== currentSelected.id),
+              [currentSelected.trackId]: newClips,
+            };
+            pushHistory(newTracks);
+            return null;
+          });
+        }, [cleanupClipResources, pushHistory, rippleMode]);
+
+        const rippleDeleteSelected = useCallback(() => {
+          setSelectedClip((currentSelected) => {
+            if (!currentSelected) return null;
+            cleanupClipResources(currentSelected.id, currentSelected.src);
+            const trackClips = stateRef.current.tracks[currentSelected.trackId];
+            const deletedStart = currentSelected.start;
+            const deletedDuration = currentSelected.duration;
+
+            const newClips = trackClips
+              .filter((c) => c.id !== currentSelected.id)
+              .map((c) => {
+                if (c.start > deletedStart) {
+                  return { ...c, start: Math.max(0, c.start - deletedDuration) };
+                }
+                return c;
+              });
+
+            const newTracks = {
+              ...stateRef.current.tracks,
+              [currentSelected.trackId]: newClips,
             };
             pushHistory(newTracks);
             return null;
@@ -1176,30 +1346,41 @@
         // --- Keyboard Shortcuts ---
         useEffect(() => {
           const handleKeyDown = (e) => {
-            if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA")
+            if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA" || e.target.tagName === "SELECT")
               return;
 
-            if ((e.ctrlKey || e.metaKey) && e.key === "c") {
-              e.preventDefault();
-              copyClip();
-            }
-            if ((e.ctrlKey || e.metaKey) && e.key === "v") {
-              e.preventDefault();
-              pasteClip();
-            }
-            if ((e.ctrlKey || e.metaKey) && e.key === "z" && !e.shiftKey) {
-              e.preventDefault();
-              undo();
-            }
-            if (
-              (e.ctrlKey || e.metaKey) &&
-              (e.key === "y" || (e.key === "z" && e.shiftKey))
-            ) {
-              e.preventDefault();
-              redo();
+            const key = e.key.toLowerCase();
+
+            // Cmd/Ctrl shortcuts
+            if (e.ctrlKey || e.metaKey) {
+              if (key === "c") {
+                e.preventDefault();
+                copyClip();
+                return;
+              }
+              if (key === "v") {
+                e.preventDefault();
+                pasteClip();
+                return;
+              }
+              if (key === "z" && !e.shiftKey) {
+                e.preventDefault();
+                undo();
+                return;
+              }
+              if (key === "y" || (key === "z" && e.shiftKey)) {
+                e.preventDefault();
+                redo();
+                return;
+              }
+              if (key === "k" || key === "b") {
+                e.preventDefault();
+                cutClip();
+                return;
+              }
             }
 
-            switch (e.key) {
+            switch (key) {
               case " ":
                 if (!e.repeat) {
                   e.preventDefault();
@@ -1207,37 +1388,34 @@
                 }
                 break;
               case "j":
-              case "J":
                 e.preventDefault();
                 updateTime(Math.max(0, stateRef.current.currentTime - 5));
                 break;
               case "k":
-              case "K":
                 e.preventDefault();
                 if (stateRef.current.isPlaying) togglePlay();
                 break;
               case "l":
-              case "L":
                 e.preventDefault();
                 updateTime(Math.min(stateRef.current.duration, stateRef.current.currentTime + 5));
                 break;
               case "i":
-              case "I":
                 e.preventDefault();
                 setLocators((p) => ({ ...p, left: stateRef.current.currentTime }));
                 break;
               case "o":
-              case "O":
                 e.preventDefault();
                 setLocators((p) => ({ ...p, right: stateRef.current.currentTime }));
                 break;
-              case "ArrowLeft":
+              case "arrowleft":
                 e.preventDefault();
-                updateTime(Math.max(0, stateRef.current.currentTime - 0.1));
+                const stepLeft = e.shiftKey ? 1.0 : 0.1;
+                updateTime(Math.max(0, stateRef.current.currentTime - stepLeft));
                 break;
-              case "ArrowRight":
+              case "arrowright":
                 e.preventDefault();
-                updateTime(Math.min(stateRef.current.duration, stateRef.current.currentTime + 0.1));
+                const stepRight = e.shiftKey ? 1.0 : 0.1;
+                updateTime(Math.min(stateRef.current.duration, stateRef.current.currentTime + stepRight));
                 break;
               case "1":
                 updateTime(stateRef.current.locators.left);
@@ -1246,15 +1424,23 @@
                 updateTime(stateRef.current.locators.right);
                 break;
               case "m":
-              case "M":
                 setMarkers((prev) => [
                   ...prev,
                   { id: generateId(), time: stateRef.current.currentTime },
                 ]);
                 break;
-              case "Delete":
-              case "Backspace":
-                deleteSelected();
+              case "delete":
+              case "backspace":
+                e.preventDefault();
+                if (e.shiftKey) {
+                  rippleDeleteSelected();
+                } else {
+                  deleteSelected();
+                }
+                break;
+              case "s":
+                e.preventDefault();
+                cutClip();
                 break;
               default:
                 break;
@@ -1262,7 +1448,7 @@
           };
           window.addEventListener("keydown", handleKeyDown);
           return () => window.removeEventListener("keydown", handleKeyDown);
-        }, [selectedClip, updateTime, deleteSelected, copyClip, pasteClip, undo, redo, togglePlay]);
+        }, [selectedClip, updateTime, deleteSelected, rippleDeleteSelected, cutClip, copyClip, pasteClip, undo, redo, togglePlay]);
 
         // --- Animation Loop ---
         const animate = useCallback(
@@ -1339,8 +1525,10 @@
               }
             } else {
               currentState.lastTime = 0;
-              requestRef.current = requestAnimationFrame(animate);
-              drawMeter();
+              const needsDecay = drawMeter();
+              if (needsDecay) {
+                requestRef.current = requestAnimationFrame(animate);
+              }
             }
           },
           [renderFrame, drawMeter],
@@ -1350,6 +1538,19 @@
           requestRef.current = requestAnimationFrame(animate);
           return () => cancelAnimationFrame(requestRef.current);
         }, [animate]);
+
+        useEffect(() => {
+          if (isPlaying) {
+            cancelAnimationFrame(requestRef.current);
+            requestRef.current = requestAnimationFrame(animate);
+          }
+        }, [isPlaying, animate]);
+
+        useEffect(() => {
+          if (!stateRef.current.isPlaying) {
+            renderFrame(stateRef.current.currentTime, true);
+          }
+        }, [tracks, currentTime, renderFrame]);
 
         // --- FIX: Timeline Wheel Handler (zoom + horizontal scroll) ---
         // Attach AFTER mount so the ref exists, and re-bind if the ref ever changes.
@@ -1470,7 +1671,7 @@
                 waveform: null,
               };
 
-              if (type === "audio") {
+              if (type === "audio" || type === "video") {
                 extractWaveform(url).then((waveform) => {
                   if (!isMounted.current) return;
                   setAssets((prev) =>
@@ -1478,7 +1679,8 @@
                   );
                   setTracks((prev) => {
                     const updatedTracks = { ...prev };
-                    ["audio1", "audio2"].forEach((tk) => {
+                    const tracksToUpdate = type === "audio" ? ["audio1", "audio2"] : ["video1", "video2", "video3"];
+                    tracksToUpdate.forEach((tk) => {
                       updatedTracks[tk] = updatedTracks[tk].map((c) =>
                         c.id === assetId ? { ...c, waveform } : c,
                       );
@@ -1644,6 +1846,9 @@
               delete updated.saturate;
               delete updated.hueRotate;
               delete updated.blur;
+              delete updated.scale;
+              delete updated.x;
+              delete updated.y;
               updated.filter = "none";
               return updated;
             }),
@@ -1656,6 +1861,9 @@
             delete updated.saturate;
             delete updated.hueRotate;
             delete updated.blur;
+            delete updated.scale;
+            delete updated.x;
+            delete updated.y;
             updated.filter = "none";
             return updated;
           });
@@ -1863,45 +2071,57 @@
               );
               newStart = getSnappedTime(newStart, draggingClip.id);
 
-              const tracksRect =
-                tracksContainerRef.current?.getBoundingClientRect();
-              if (tracksRect) {
-                const relativeY =
-                  e.clientY -
-                  tracksRect.top +
-                  (tracksContainerRef.current.scrollTop || 0);
-                const trackIndex = Math.floor(relativeY / CONFIG.trackHeight);
+               const tracksRect =
+                 tracksContainerRef.current?.getBoundingClientRect();
+               if (tracksRect) {
+                 const relativeY =
+                   e.clientY -
+                   tracksRect.top +
+                   (tracksContainerRef.current.scrollTop || 0);
+                 const trackIndex = Math.floor(relativeY / CONFIG.trackHeight);
+ 
+                 if (trackIndex >= 0 && trackIndex < TRACK_ORDER.length) {
+                   const newTrackId = TRACK_ORDER[trackIndex];
+                   if (newTrackId !== draggingClip.trackId) {
+                     const clip = tracks[draggingClip.trackId].find(
+                       (c) => c.id === draggingClip.id,
+                     );
+                     
+                     const isTrackCompatible = (clipType, tId) => {
+                       if (clipType === "text") return tId === "text1";
+                       if (clipType === "audio") return tId.startsWith("audio");
+                       return tId.startsWith("video"); // video or image
+                     };
 
-                if (trackIndex >= 0 && trackIndex < TRACK_ORDER.length) {
-                  const newTrackId = TRACK_ORDER[trackIndex];
-                  if (newTrackId !== draggingClip.trackId) {
-                    setTracks((prev) => {
-                      const clip = prev[draggingClip.trackId].find(
-                        (c) => c.id === draggingClip.id,
-                      );
-                      if (!clip) return prev;
-                      const newClip = { ...clip, start: newStart };
-                      return {
-                        ...prev,
-                        [draggingClip.trackId]: prev[
-                          draggingClip.trackId
-                        ].filter((c) => c.id !== draggingClip.id),
-                        [newTrackId]: [...prev[newTrackId], newClip],
-                      };
-                    });
-                    setDraggingClip((prev) => ({
-                      ...prev,
-                      trackId: newTrackId,
-                    }));
-                    setSelectedClip((prev) => ({
-                      ...prev,
-                      trackId: newTrackId,
-                      start: newStart,
-                    }));
-                    return;
-                  }
-                }
-              }
+                     if (clip && isTrackCompatible(clip.type, newTrackId)) {
+                       setTracks((prev) => {
+                         const c = prev[draggingClip.trackId].find(
+                           (x) => x.id === draggingClip.id,
+                         );
+                         if (!c) return prev;
+                         const newClip = { ...c, start: newStart };
+                         return {
+                           ...prev,
+                           [draggingClip.trackId]: prev[
+                             draggingClip.trackId
+                           ].filter((x) => x.id !== draggingClip.id),
+                           [newTrackId]: [...prev[newTrackId], newClip],
+                         };
+                       });
+                       setDraggingClip((prev) => ({
+                         ...prev,
+                         trackId: newTrackId,
+                       }));
+                       setSelectedClip((prev) => ({
+                         ...prev,
+                         trackId: newTrackId,
+                         start: newStart,
+                       }));
+                       return;
+                     }
+                   }
+                 }
+               }
 
               setTracks((prev) => ({
                 ...prev,
@@ -2039,36 +2259,44 @@
                           <kbd className="bg-neutral-800 px-1.5 py-0.5 rounded text-neutral-300 border border-neutral-700">Space</kbd>
                         </li>
                         <li className="flex justify-between border-b border-neutral-900/50 pb-1">
-                          <span>Go to IN Point</span>
-                          <kbd className="bg-neutral-800 px-1.5 py-0.5 rounded text-neutral-300 border border-neutral-700">1</kbd>
+                          <span>Copy / Paste Clip</span>
+                          <kbd className="bg-neutral-800 px-1.5 py-0.5 rounded text-neutral-300 border border-neutral-700">Cmd+C / Cmd+V</kbd>
                         </li>
                         <li className="flex justify-between border-b border-neutral-900/50 pb-1">
-                          <span>Go to OUT Point</span>
-                          <kbd className="bg-neutral-800 px-1.5 py-0.5 rounded text-neutral-300 border border-neutral-700">2</kbd>
+                          <span>Split Clip</span>
+                          <kbd className="bg-neutral-800 px-1.5 py-0.5 rounded text-neutral-300 border border-neutral-700">S / Cmd+K</kbd>
                         </li>
                         <li className="flex justify-between border-b border-neutral-900/50 pb-1">
-                          <span>Delete Clip</span>
-                          <kbd className="bg-neutral-800 px-1.5 py-0.5 rounded text-neutral-300 border border-neutral-700">Del / Backspace</kbd>
+                          <span>Normal Delete</span>
+                          <kbd className="bg-neutral-800 px-1.5 py-0.5 rounded text-neutral-300 border border-neutral-700">Delete</kbd>
+                        </li>
+                        <li className="flex justify-between border-b border-neutral-900/50 pb-1">
+                          <span>Ripple Delete</span>
+                          <kbd className="bg-neutral-800 px-1.5 py-0.5 rounded text-neutral-300 border border-neutral-700">Shift+Delete</kbd>
+                        </li>
+                        <li className="flex justify-between border-b border-neutral-900/50 pb-1">
+                          <span>Fine Scrub (0.1s)</span>
+                          <kbd className="bg-neutral-800 px-1.5 py-0.5 rounded text-neutral-300 border border-neutral-700">← / →</kbd>
+                        </li>
+                        <li className="flex justify-between border-b border-neutral-900/50 pb-1">
+                          <span>Fast Scrub (1.0s)</span>
+                          <kbd className="bg-neutral-800 px-1.5 py-0.5 rounded text-neutral-300 border border-neutral-700">Shift+← / →</kbd>
+                        </li>
+                        <li className="flex justify-between border-b border-neutral-900/50 pb-1">
+                          <span>Go to In / Out</span>
+                          <kbd className="bg-neutral-800 px-1.5 py-0.5 rounded text-neutral-300 border border-neutral-700">1 / 2</kbd>
                         </li>
                         <li className="flex justify-between border-b border-neutral-900/50 pb-1">
                           <span>Add Marker</span>
                           <kbd className="bg-neutral-800 px-1.5 py-0.5 rounded text-neutral-300 border border-neutral-700">M</kbd>
                         </li>
                         <li className="flex justify-between border-b border-neutral-900/50 pb-1">
-                          <span>Zoom Timeline</span>
-                          <kbd className="bg-neutral-800 px-1.5 py-0.5 rounded text-neutral-300 border border-neutral-700">Ctrl / Cmd + Wheel</kbd>
-                        </li>
-                        <li className="flex justify-between border-b border-neutral-900/50 pb-1">
-                          <span>Scroll Timeline</span>
-                          <kbd className="bg-neutral-800 px-1.5 py-0.5 rounded text-neutral-300 border border-neutral-700">Shift + Wheel</kbd>
-                        </li>
-                        <li className="flex justify-between border-b border-neutral-900/50 pb-1">
                           <span>Undo / Redo</span>
-                          <kbd className="bg-neutral-800 px-1.5 py-0.5 rounded text-neutral-300 border border-neutral-700">Cmd+Z / Cmd+Shift+Z</kbd>
+                          <kbd className="bg-neutral-800 px-1.5 py-0.5 rounded text-neutral-300 border border-neutral-700">Cmd+Z / Shift+Z</kbd>
                         </li>
                       </ul>
-                      <div className="mt-6 bg-blue-950/20 border border-blue-900/40 p-4 rounded-xl text-xs text-blue-300 font-sans">
-                        <strong>Pro Tip:</strong> Click a clip to select it, then adjust visual filters (brightness, saturation, contrast, blur) and fades directly in the Right Inspector Panel!
+                      <div className="mt-4 bg-blue-950/20 border border-blue-900/40 p-4 rounded-xl text-xs text-blue-300 font-sans">
+                        <strong>Pro Tip:</strong> Click a clip to select it, then adjust visual filters (brightness, saturation, contrast, blur), volume/pan keyframes, and transforms directly in the Right Inspector Panel!
                       </div>
                     </div>
                     <div className="space-y-4">
@@ -2098,15 +2326,15 @@
                         <ul className="text-xs space-y-2">
                           <li className="flex items-start gap-1">
                             <span className="text-blue-500 font-bold">•</span>
-                            <span><strong>Split Clips:</strong> Position the playhead inside a clip and click <strong>Split</strong> on the toolbar (or press shortcut).</span>
+                            <span><strong>Magnetic Ripple Editing:</strong> Enable Ripple Mode (Layers icon on toolbar) to automatically snap gaps shut when clips are deleted. Or use `Shift+Delete` for explicit ripple deletes.</span>
                           </li>
                           <li className="flex items-start gap-1">
                             <span className="text-blue-500 font-bold">•</span>
-                            <span><strong>Audio Fades:</strong> Shift + Drag the left/right edges of a clip to add fading transitions, or adjust them mathematically in the Inspector.</span>
+                            <span><strong>Audio Curves & Pan:</strong> Open "Audio Curves" in the Inspector to add keyframes at the playhead, allowing you to animate volume and left-to-right stereo panning across the clip duration.</span>
                           </li>
                           <li className="flex items-start gap-1">
                             <span className="text-blue-500 font-bold">•</span>
-                            <span><strong>Snapping:</strong> Turn on Snapping (magnet icon) to snap clip starts, ends, locators, and playhead to active edges/markers with a yellow snapping guide.</span>
+                            <span><strong>Visual Transformations:</strong> Reposition and resize video/image layers using the scale and XY coordinates inside the Transform panel. Perfect for picture-in-picture effects.</span>
                           </li>
                         </ul>
                       </div>
@@ -2618,6 +2846,15 @@
                     >
                       <Magnet className="w-3.5 h-3.5" />
                     </button>
+
+                    {/* Ripple Mode Toggle */}
+                    <button
+                      onClick={() => setRippleMode(!rippleMode)}
+                      className={`p-2 rounded-lg border transition-all ${rippleMode ? "bg-blue-600/10 border-blue-500/30 text-blue-400" : "bg-neutral-900 border-neutral-800 text-neutral-500 hover:text-neutral-300"}`}
+                      title="Toggle Ripple Mode (Magnetic Timeline)"
+                    >
+                      <Layers className="w-3.5 h-3.5" />
+                    </button>
                     
                     {/* Timeline Zoom Slider */}
                     <div className="flex items-center gap-2">
@@ -3027,6 +3264,88 @@
                             />
                           </div>
                         </div>
+
+                        {/* Text Outline Toggle */}
+                        <div className="flex items-center justify-between bg-[#181822]/40 p-2.5 rounded-xl border border-neutral-850">
+                          <span className="text-xs text-neutral-400 flex items-center gap-2 font-sans font-medium">
+                            Text Outline
+                          </span>
+                          <button
+                            onClick={() => updateTextProp("textStroke", !selectedClip.textStroke)}
+                            className={`w-9 h-5 rounded-full p-0.5 transition-colors duration-200 ${selectedClip.textStroke ? "bg-blue-600 flex justify-end" : "bg-neutral-700 flex justify-start"}`}
+                          >
+                            <div className="w-4 h-4 bg-white rounded-full shadow"></div>
+                          </button>
+                        </div>
+
+                        {selectedClip.textStroke && (
+                          <div className="grid grid-cols-2 gap-4">
+                            <div className="flex flex-col gap-1.5">
+                              <span className="text-[10px] text-neutral-500 font-medium">Outline Color</span>
+                              <div className="flex items-center gap-2">
+                                <input
+                                  type="color"
+                                  value={selectedClip.textStrokeColor || "#000000"}
+                                  onChange={(e) => updateTextProp("textStrokeColor", e.target.value)}
+                                  className="w-8 h-8 rounded bg-transparent border-none cursor-pointer"
+                                />
+                                <span className="text-[10px] font-mono text-neutral-400">{selectedClip.textStrokeColor || "#000000"}</span>
+                              </div>
+                            </div>
+                            <div className="flex flex-col gap-1.5">
+                              <span className="text-[10px] text-neutral-500 font-medium">Thickness</span>
+                              <input
+                                type="number"
+                                value={selectedClip.textStrokeWidth || 6}
+                                onChange={(e) => updateTextProp("textStrokeWidth", Number(e.target.value))}
+                                className="bg-neutral-900 text-white rounded-lg px-3 py-2 outline-none border border-neutral-800 text-xs w-full font-mono"
+                                min="1"
+                                max="30"
+                              />
+                            </div>
+                          </div>
+                        )}
+
+                        {/* Text Shadow Toggle */}
+                        <div className="flex items-center justify-between bg-[#181822]/40 p-2.5 rounded-xl border border-neutral-850">
+                          <span className="text-xs text-neutral-400 flex items-center gap-2 font-sans font-medium">
+                            Text Shadow
+                          </span>
+                          <button
+                            onClick={() => updateTextProp("textShadow", !selectedClip.textShadow)}
+                            className={`w-9 h-5 rounded-full p-0.5 transition-colors duration-200 ${selectedClip.textShadow ? "bg-blue-600 flex justify-end" : "bg-neutral-700 flex justify-start"}`}
+                          >
+                            <div className="w-4 h-4 bg-white rounded-full shadow"></div>
+                          </button>
+                        </div>
+
+                        {selectedClip.textShadow && (
+                          <div className="grid grid-cols-2 gap-4">
+                            <div className="flex flex-col gap-1.5">
+                              <span className="text-[10px] text-neutral-500 font-medium">Shadow Color</span>
+                              <div className="flex items-center gap-2">
+                                <input
+                                  type="color"
+                                  value={selectedClip.textShadowColor || "#000000"}
+                                  onChange={(e) => updateTextProp("textShadowColor", e.target.value)}
+                                  className="w-8 h-8 rounded bg-transparent border-none cursor-pointer"
+                                />
+                                <span className="text-[10px] font-mono text-neutral-400">{selectedClip.textShadowColor || "#000000"}</span>
+                              </div>
+                            </div>
+                            <div className="flex flex-col gap-1.5">
+                              <span className="text-[10px] text-neutral-500 font-medium">Blur Radius</span>
+                              <input
+                                type="number"
+                                value={selectedClip.textShadowBlur || 8}
+                                onChange={(e) => updateTextProp("textShadowBlur", Number(e.target.value))}
+                                className="bg-neutral-900 text-white rounded-lg px-3 py-2 outline-none border border-neutral-800 text-xs w-full font-mono"
+                                min="1"
+                                max="30"
+                              />
+                            </div>
+                          </div>
+                        )}
                       </div>
                     )}
 
@@ -3108,6 +3427,240 @@
                               value={selectedClip.fadeOutDuration || 0}
                               onChange={(e) => updateFadeProp("fadeOutDuration", e.target.value)}
                               className="bg-neutral-900 text-white rounded-lg px-3 py-2 outline-none border border-neutral-800 text-xs w-full font-mono"
+                            />
+                          </div>
+                        </div>
+
+                        {/* Audio automation curves */}
+                        <div className="space-y-4 pt-4 border-t border-neutral-900">
+                          <div className="flex justify-between items-center text-xs">
+                            <span className="font-semibold text-white text-[10px] uppercase tracking-wide">Volume Automation</span>
+                            <button
+                              onClick={() => {
+                                const relTime = Math.max(0, stateRef.current.currentTime - selectedClip.start);
+                                const currentVal = getInterpolatedValue(selectedClip.volumeKeyframes, relTime, selectedClip.volume ?? 1);
+                                const newKeyframes = [
+                                  ...(selectedClip.volumeKeyframes || []),
+                                  { id: generateId(), time: relTime, value: currentVal }
+                                ].sort((a, b) => a.time - b.time);
+                                
+                                const newTracks = {
+                                  ...stateRef.current.tracks,
+                                  [selectedClip.trackId]: stateRef.current.tracks[selectedClip.trackId].map((c) =>
+                                    c.id === selectedClip.id ? { ...c, volumeKeyframes: newKeyframes } : c
+                                  ),
+                                };
+                                pushHistory(newTracks);
+                                setSelectedClip((prev) => ({ ...prev, volumeKeyframes: newKeyframes }));
+                              }}
+                              className="text-[10px] font-semibold text-blue-500 hover:text-blue-400 transition-colors uppercase tracking-wide"
+                            >
+                              + Add Keyframe
+                            </button>
+                          </div>
+                          
+                          {(selectedClip.volumeKeyframes || []).length === 0 ? (
+                            <div className="text-[10px] text-neutral-600 italic">No volume keyframes set (using static volume).</div>
+                          ) : (
+                            <div className="space-y-2 max-h-32 overflow-y-auto pr-1 bg-neutral-950/40 p-2 rounded-lg border border-neutral-850">
+                              {(selectedClip.volumeKeyframes || []).map((kf) => (
+                                <div key={kf.id} className="flex items-center justify-between gap-2 text-xs">
+                                  <span className="font-mono text-[10px] text-neutral-500 w-12">{kf.time.toFixed(2)}s:</span>
+                                  <input
+                                    type="range"
+                                    min="0"
+                                    max="1"
+                                    step="0.05"
+                                    value={kf.value}
+                                    onChange={(e) => {
+                                      const newKeyframes = selectedClip.volumeKeyframes.map((k) =>
+                                        k.id === kf.id ? { ...k, value: parseFloat(e.target.value) } : k
+                                      );
+                                      const newTracks = {
+                                        ...stateRef.current.tracks,
+                                        [selectedClip.trackId]: stateRef.current.tracks[selectedClip.trackId].map((c) =>
+                                          c.id === selectedClip.id ? { ...c, volumeKeyframes: newKeyframes } : c
+                                        ),
+                                      };
+                                      pushHistory(newTracks);
+                                      setSelectedClip((prev) => ({ ...prev, volumeKeyframes: newKeyframes }));
+                                    }}
+                                    className="flex-1 h-1 bg-neutral-800 rounded-lg appearance-none cursor-pointer accent-blue-500"
+                                  />
+                                  <span className="font-mono text-[9px] text-neutral-400 w-8">{(kf.value * 100).toFixed(0)}%</span>
+                                  <button
+                                    onClick={() => {
+                                      const newKeyframes = selectedClip.volumeKeyframes.filter((k) => k.id !== kf.id);
+                                      const newTracks = {
+                                        ...stateRef.current.tracks,
+                                        [selectedClip.trackId]: stateRef.current.tracks[selectedClip.trackId].map((c) =>
+                                          c.id === selectedClip.id ? { ...c, volumeKeyframes: newKeyframes } : c
+                                        ),
+                                      };
+                                      pushHistory(newTracks);
+                                      setSelectedClip((prev) => ({ ...prev, volumeKeyframes: newKeyframes }));
+                                    }}
+                                    className="text-neutral-500 hover:text-red-400 p-0.5"
+                                  >
+                                    <X className="w-3 h-3" />
+                                  </button>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+
+                          <div className="flex justify-between items-center text-xs pt-2">
+                            <span className="font-semibold text-white text-[10px] uppercase tracking-wide">Panning (L/R) Automation</span>
+                            <button
+                              onClick={() => {
+                                const relTime = Math.max(0, stateRef.current.currentTime - selectedClip.start);
+                                const currentVal = getInterpolatedValue(selectedClip.panKeyframes, relTime, selectedClip.pan ?? 0);
+                                const newKeyframes = [
+                                  ...(selectedClip.panKeyframes || []),
+                                  { id: generateId(), time: relTime, value: currentVal }
+                                ].sort((a, b) => a.time - b.time);
+                                
+                                const newTracks = {
+                                  ...stateRef.current.tracks,
+                                  [selectedClip.trackId]: stateRef.current.tracks[selectedClip.trackId].map((c) =>
+                                    c.id === selectedClip.id ? { ...c, panKeyframes: newKeyframes } : c
+                                  ),
+                                };
+                                pushHistory(newTracks);
+                                setSelectedClip((prev) => ({ ...prev, panKeyframes: newKeyframes }));
+                              }}
+                              className="text-[10px] font-semibold text-blue-500 hover:text-blue-400 transition-colors uppercase tracking-wide"
+                            >
+                              + Add Keyframe
+                            </button>
+                          </div>
+                          
+                          {(selectedClip.panKeyframes || []).length === 0 ? (
+                            <div className="text-[10px] text-neutral-600 italic">No panning keyframes set (using center pan).</div>
+                          ) : (
+                            <div className="space-y-2 max-h-32 overflow-y-auto pr-1 bg-neutral-950/40 p-2 rounded-lg border border-neutral-850">
+                              {(selectedClip.panKeyframes || []).map((kf) => (
+                                <div key={kf.id} className="flex items-center justify-between gap-2 text-xs">
+                                  <span className="font-mono text-[10px] text-neutral-500 w-12">{kf.time.toFixed(2)}s:</span>
+                                  <span className="text-[9px] text-neutral-400">L</span>
+                                  <input
+                                    type="range"
+                                    min="-1"
+                                    max="1"
+                                    step="0.1"
+                                    value={kf.value}
+                                    onChange={(e) => {
+                                      const newKeyframes = selectedClip.panKeyframes.map((k) =>
+                                        k.id === kf.id ? { ...k, value: parseFloat(e.target.value) } : k
+                                      );
+                                      const newTracks = {
+                                        ...stateRef.current.tracks,
+                                        [selectedClip.trackId]: stateRef.current.tracks[selectedClip.trackId].map((c) =>
+                                          c.id === selectedClip.id ? { ...c, panKeyframes: newKeyframes } : c
+                                        ),
+                                      };
+                                      pushHistory(newTracks);
+                                      setSelectedClip((prev) => ({ ...prev, panKeyframes: newKeyframes }));
+                                    }}
+                                    className="flex-1 h-1 bg-neutral-800 rounded-lg appearance-none cursor-pointer accent-blue-500"
+                                  />
+                                  <span className="text-[9px] text-neutral-400">R</span>
+                                  <span className="font-mono text-[9px] text-neutral-400 w-8">{kf.value > 0 ? `R${kf.value.toFixed(1)}` : kf.value < 0 ? `L${Math.abs(kf.value).toFixed(1)}` : "C"}</span>
+                                  <button
+                                    onClick={() => {
+                                      const newKeyframes = selectedClip.panKeyframes.filter((k) => k.id !== kf.id);
+                                      const newTracks = {
+                                        ...stateRef.current.tracks,
+                                        [selectedClip.trackId]: stateRef.current.tracks[selectedClip.trackId].map((c) =>
+                                          c.id === selectedClip.id ? { ...c, panKeyframes: newKeyframes } : c
+                                        ),
+                                      };
+                                      pushHistory(newTracks);
+                                      setSelectedClip((prev) => ({ ...prev, panKeyframes: newKeyframes }));
+                                    }}
+                                    className="text-neutral-500 hover:text-red-400 p-0.5"
+                                  >
+                                    <X className="w-3 h-3" />
+                                  </button>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Transform Inspector UI */}
+                    {(selectedClip.type === "video" || selectedClip.type === "image") && (
+                      <div className="space-y-4 pt-4 border-t border-neutral-900">
+                        <div className="flex items-center justify-between pb-1 border-b border-neutral-850">
+                          <span className="font-semibold text-white text-xs uppercase tracking-wide">Transform</span>
+                          <button
+                            onClick={() => {
+                              const newTracks = {
+                                ...stateRef.current.tracks,
+                                [selectedClip.trackId]: stateRef.current.tracks[selectedClip.trackId].map((c) => {
+                                  if (c.id !== selectedClip.id) return c;
+                                  const updated = { ...c };
+                                  delete updated.scale;
+                                  delete updated.x;
+                                  delete updated.y;
+                                  return updated;
+                                }),
+                              };
+                              pushHistory(newTracks);
+                              setSelectedClip((prev) => {
+                                const updated = { ...prev };
+                                delete updated.scale;
+                                delete updated.x;
+                                delete updated.y;
+                                return updated;
+                              });
+                            }}
+                            className="text-[10px] font-semibold text-blue-500 hover:text-blue-400 transition-colors uppercase tracking-wide"
+                          >
+                            Reset
+                          </button>
+                        </div>
+
+                        {/* Scale */}
+                        <div className="space-y-1.5">
+                          <div className="flex justify-between text-[10px] text-neutral-500 font-sans">
+                            <span>Scale</span>
+                            <span className="font-mono text-neutral-400">{selectedClip.scale ?? 100}%</span>
+                          </div>
+                          <input
+                            type="range"
+                            min="10"
+                            max="200"
+                            value={selectedClip.scale ?? 100}
+                            onChange={(e) => updateClipFilterVal("scale", e.target.value)}
+                            className="w-full h-1 bg-neutral-800 rounded-lg appearance-none cursor-pointer accent-blue-500"
+                          />
+                        </div>
+
+                        {/* Position X and Y */}
+                        <div className="grid grid-cols-2 gap-4">
+                          <div className="flex flex-col gap-1.5 font-sans">
+                            <span className="text-[10px] text-neutral-500 font-medium">Position X (%)</span>
+                            <input
+                              type="number"
+                              value={selectedClip.x !== undefined ? selectedClip.x : 50}
+                              onChange={(e) => updateClipFilterVal("x", e.target.value)}
+                              className="bg-neutral-900 text-white rounded-lg px-3 py-2 outline-none border border-neutral-800 text-xs w-full font-mono"
+                              min="0"
+                              max="100"
+                            />
+                          </div>
+                          <div className="flex flex-col gap-1.5 font-sans">
+                            <span className="text-[10px] text-neutral-500 font-medium">Position Y (%)</span>
+                            <input
+                              type="number"
+                              value={selectedClip.y !== undefined ? selectedClip.y : 50}
+                              onChange={(e) => updateClipFilterVal("y", e.target.value)}
+                              className="bg-neutral-900 text-white rounded-lg px-3 py-2 outline-none border border-neutral-800 text-xs w-full font-mono"
+                              min="0"
+                              max="100"
                             />
                           </div>
                         </div>
