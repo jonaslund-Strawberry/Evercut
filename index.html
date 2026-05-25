@@ -1,0 +1,3255 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>EverCut Pro - Premium Web Video Editor</title>
+    <!-- Google Fonts: Outfit and JetBrains Mono -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,100..800;1,100..800&family=Outfit:wght@100..900&display=swap" rel="stylesheet">
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script>
+      tailwind.config = {
+        theme: {
+          extend: {
+            fontFamily: {
+              sans: ['Outfit', 'sans-serif'],
+              mono: ['JetBrains Mono', 'monospace'],
+            }
+          }
+        }
+      }
+    </script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  </head>
+  <body class="bg-neutral-900 text-white font-sans antialiased">
+    <div id="root"></div>
+    <script type="text/babel" data-type="module">
+      import React, {
+        useState,
+        useRef,
+        useEffect,
+        useCallback,
+      } from "https://esm.sh/react@18.2.0";
+      import { createRoot } from "https://esm.sh/react-dom@18.2.0/client";
+      import {
+        Play,
+        Pause,
+        SkipBack,
+        SkipForward,
+        Scissors,
+        Trash2,
+        Upload,
+        Download,
+        Settings,
+        Layers,
+        Music,
+        Image as ImageIcon,
+        Video,
+        Monitor,
+        ChevronLeft,
+        ChevronRight,
+        Activity,
+        Volume2,
+        ZoomIn,
+        ZoomOut,
+        Magnet,
+        Square,
+        Rewind,
+        FastForward,
+        Minimize2,
+        Maximize2,
+        VolumeX,
+        Anchor,
+        HelpCircle,
+        Repeat,
+        MapPin,
+        X,
+        TrendingUp,
+        TrendingDown,
+        FileVideo,
+        Copy,
+        Clipboard,
+        Move,
+        Keyboard,
+        Undo,
+        Redo,
+        Folder,
+        Plus,
+        Eye,
+        EyeOff,
+        Lock,
+        Unlock,
+      } from "https://esm.sh/lucide-react@0.292.0";
+
+      const CONFIG = {
+        width: 1920,
+        height: 1080,
+        fps: 30,
+        trackHeight: 100,
+        headerHeight: 40,
+        snapThresholdPx: 15,
+        minClipDuration: 0.5,
+        waveformSamples: 100,
+      };
+
+      const TRACK_ORDER = [
+        "text1",
+        "video3",
+        "video2",
+        "video1",
+        "audio1",
+        "audio2",
+      ];
+
+      const formatTime = (seconds) => {
+        const m = Math.floor(seconds / 60);
+        const s = Math.floor(seconds % 60);
+        const ms = Math.floor((seconds % 1) * 100);
+        return `${m.toString().padStart(2, "0")}:${s.toString().padStart(2, "0")}.${ms.toString().padStart(2, "0")}`;
+      };
+
+      const generateId = () => Math.random().toString(36).substr(2, 9);
+
+      function WebVideoEditor() {
+        const [isPlaying, setIsPlaying] = useState(false);
+        const [currentTime, setCurrentTime] = useState(0);
+        const [duration, setDuration] = useState(60);
+        const [zoomLevel, setZoomLevel] = useState(20);
+        const [snapping, setSnapping] = useState(true);
+        const [isLooping, setIsLooping] = useState(false);
+        const [showHelp, setShowHelp] = useState(false);
+        const [exportFormat, setExportFormat] = useState("mp4");
+        const [masterVolume, setMasterVolume] = useState(1.0);
+
+        const [tracks, setTracks] = useState({
+          text1: [],
+          video3: [],
+          video2: [],
+          video1: [],
+          audio1: [],
+          audio2: [],
+        });
+        const [history, setHistory] = useState({ past: [], future: [] });
+
+        const [markers, setMarkers] = useState([]);
+        const [selectedClip, setSelectedClip] = useState(null);
+        const [clipboard, setClipboard] = useState(null);
+
+        const [draggingClip, setDraggingClip] = useState(null);
+        const [draggingLocator, setDraggingLocator] = useState(null);
+        const [trimming, setTrimming] = useState(null);
+
+        const [locators, setLocators] = useState({ left: 0, right: 10 });
+        const [isRendering, setIsRendering] = useState(false);
+
+        // EverCut Pro state additions
+        const [assets, setAssets] = useState([]);
+        const [isInspectorOpen, setIsInspectorOpen] = useState(true);
+        const [isLibraryOpen, setIsLibraryOpen] = useState(true);
+        const [activeSnapTime, setActiveSnapTime] = useState(null);
+        const [exportProgress, setExportProgress] = useState(0);
+
+        const canvasRef = useRef(null);
+        const previewContainerRef = useRef(null);
+        const timelineContainerRef = useRef(null);
+        const tracksContainerRef = useRef(null);
+        const hiddenMediaContainerRef = useRef(null);
+        const meterCanvasRef = useRef(null);
+
+        // FIX: declare the missing preDragState ref that was used but never created.
+        const preDragState = useRef(null);
+
+        const videoElementsRef = useRef({});
+        const audioElementsRef = useRef({});
+        const audioGainNodesRef = useRef({});
+        const requestRef = useRef();
+        const mediaRecorderRef = useRef(null);
+        const isMounted = useRef(true);
+
+        const stateRef = useRef({
+          currentTime: 0,
+          isPlaying: false,
+          isRendering: false,
+          tracks: {
+            text1: [],
+            video3: [],
+            video2: [],
+            video1: [],
+            audio1: [],
+            audio2: [],
+          },
+          locators: { left: 0, right: 10 },
+          duration: 60,
+          isLooping: false,
+          lastTime: 0,
+          masterVolume: 1.0,
+          zoomLevel: 20,
+          snapping: true,
+          markers: [],
+        });
+
+        const audioContextRef = useRef(null);
+        const destNodeRef = useRef(null);
+        const masterGainRef = useRef(null);
+        const analyserRef = useRef(null);
+        const analyserLRef = useRef(null);
+        const analyserRRef = useRef(null);
+        const audioSourcesRef = useRef(new Map());
+
+        // --- Actions ---
+        const updateTime = useCallback((newTime) => {
+          setCurrentTime(newTime);
+          stateRef.current.currentTime = newTime;
+          requestAnimationFrame(() => renderFrame(newTime, true));
+        }, []);
+
+        const initAudio = () => {
+          if (!audioContextRef.current) {
+            const AudioContext =
+              window.AudioContext || window.webkitAudioContext;
+            audioContextRef.current = new AudioContext();
+
+            masterGainRef.current = audioContextRef.current.createGain();
+            masterGainRef.current.gain.value = stateRef.current.masterVolume;
+
+            analyserRef.current = audioContextRef.current.createAnalyser();
+            analyserRef.current.fftSize = 256;
+            masterGainRef.current.connect(analyserRef.current);
+
+            // Channel splitter for stereo VU meter
+            const splitter = audioContextRef.current.createChannelSplitter(2);
+            masterGainRef.current.connect(splitter);
+
+            analyserLRef.current = audioContextRef.current.createAnalyser();
+            analyserLRef.current.fftSize = 256;
+            analyserRRef.current = audioContextRef.current.createAnalyser();
+            analyserRRef.current.fftSize = 256;
+
+            splitter.connect(analyserLRef.current, 0); // left
+            splitter.connect(analyserRRef.current, 1); // right
+
+            analyserRef.current.connect(audioContextRef.current.destination);
+
+            destNodeRef.current =
+              audioContextRef.current.createMediaStreamDestination();
+            analyserRef.current.connect(destNodeRef.current);
+          }
+          if (audioContextRef.current.state === "suspended") {
+            audioContextRef.current.resume();
+          }
+        };
+
+        const handleExport = async () => {
+          initAudio();
+          updateTime(locators.left);
+
+          const stream = canvasRef.current.captureStream(CONFIG.fps);
+          const audioTrack = destNodeRef.current?.stream.getAudioTracks()[0];
+          if (audioTrack) stream.addTrack(audioTrack);
+
+          const chunks = [];
+          let mimeType = "video/webm; codecs=vp9";
+          if (exportFormat === "mp4") {
+            if (
+              MediaRecorder.isTypeSupported("video/mp4; codecs=avc1.42E01E")
+            ) {
+              mimeType = "video/mp4; codecs=avc1.42E01E";
+            } else if (MediaRecorder.isTypeSupported("video/mp4")) {
+              mimeType = "video/mp4";
+            } else {
+              alert("MP4 not supported. Exporting WebM.");
+              setExportFormat("webm");
+            }
+          }
+
+          try {
+            const recorder = new MediaRecorder(stream, { mimeType });
+            recorder.ondataavailable = (e) => {
+              if (e.data.size > 0) chunks.push(e.data);
+            };
+            recorder.onstop = () => {
+              const blob = new Blob(chunks, { type: mimeType.split(";")[0] });
+              const url = URL.createObjectURL(blob);
+              const a = document.createElement("a");
+              a.href = url;
+              const ext =
+                exportFormat === "mp4" && mimeType.includes("mp4")
+                  ? "mp4"
+                  : "webm";
+              a.download = `render_${Date.now()}.${ext}`;
+              a.click();
+            };
+
+            mediaRecorderRef.current = recorder;
+            recorder.start();
+            setIsRendering(true);
+            setIsPlaying(true);
+          } catch (e) {
+            setIsRendering(false);
+            setIsPlaying(false);
+            console.error(e);
+            alert("Export failed. Browser error.");
+          }
+        };
+
+        // --- History ---
+        const pushHistory = useCallback((newTracks, saveState = null) => {
+          setHistory((prev) => {
+            const stateToSave = saveState || stateRef.current.tracks;
+            const lastPast = prev.past[prev.past.length - 1];
+            if (
+              lastPast &&
+              JSON.stringify(lastPast) === JSON.stringify(stateToSave)
+            ) {
+              return prev;
+            }
+            return {
+              past: [...prev.past, stateToSave],
+              future: [],
+            };
+          });
+          if (newTracks) {
+            setTracks(newTracks);
+          }
+        }, []);
+
+        const undo = useCallback(() => {
+          setHistory((prev) => {
+            if (prev.past.length === 0) return prev;
+            const newPast = [...prev.past];
+            const previousState = newPast.pop();
+            setTracks(previousState);
+            return {
+              past: newPast,
+              future: [stateRef.current.tracks, ...prev.future],
+            };
+          });
+        }, []);
+
+        const redo = useCallback(() => {
+          setHistory((prev) => {
+            if (prev.future.length === 0) return prev;
+            const newFuture = [...prev.future];
+            const nextState = newFuture.shift();
+            setTracks(nextState);
+            return {
+              past: [...prev.past, stateRef.current.tracks],
+              future: newFuture,
+            };
+          });
+        }, []);
+
+        // Keep refs in sync
+        useEffect(() => {
+          stateRef.current.currentTime = currentTime;
+          stateRef.current.isPlaying = isPlaying;
+          stateRef.current.isRendering = isRendering;
+          stateRef.current.tracks = tracks;
+          stateRef.current.locators = locators;
+          stateRef.current.duration = duration;
+          stateRef.current.isLooping = isLooping;
+          stateRef.current.masterVolume = masterVolume;
+          stateRef.current.zoomLevel = zoomLevel;
+          stateRef.current.snapping = snapping;
+          stateRef.current.markers = markers;
+        }, [
+          currentTime,
+          isPlaying,
+          isRendering,
+          tracks,
+          locators,
+          duration,
+          isLooping,
+          masterVolume,
+          zoomLevel,
+          snapping,
+          markers,
+        ]);
+
+        // --- Dynamic Duration Effect ---
+        useEffect(() => {
+          let maxTime = 60;
+          Object.values(tracks)
+            .flat()
+            .forEach((clip) => {
+              const end = clip.start + clip.duration;
+              if (end > maxTime) maxTime = end;
+            });
+          setDuration(Math.ceil(maxTime + 10));
+        }, [tracks]);
+
+        const setupAudioConnection = (element, id) => {
+          initAudio();
+          if (audioSourcesRef.current.has(element)) return;
+
+          try {
+            const source =
+              audioContextRef.current.createMediaElementSource(element);
+            const clipGain = audioContextRef.current.createGain();
+
+            source.connect(clipGain);
+            clipGain.connect(masterGainRef.current);
+
+            audioSourcesRef.current.set(element, source);
+            audioGainNodesRef.current[id] = clipGain;
+          } catch (e) {
+            console.warn("Audio connection warning:", e);
+          }
+        };
+
+        const extractWaveform = async (url) => {
+          try {
+            const response = await fetch(url);
+            const arrayBuffer = await response.arrayBuffer();
+            const audioCtx = new (
+              window.AudioContext || window.webkitAudioContext
+            )();
+            const audioBuffer = await audioCtx.decodeAudioData(arrayBuffer);
+
+            const rawData = audioBuffer.getChannelData(0);
+            const samples = CONFIG.waveformSamples;
+            const blockSize = Math.floor(rawData.length / samples);
+            const filteredData = [];
+
+            for (let i = 0; i < samples; i++) {
+              let sum = 0;
+              for (let j = 0; j < blockSize; j++) {
+                sum += Math.abs(rawData[blockSize * i + j]);
+              }
+              filteredData.push(sum / blockSize);
+            }
+
+            const multiplier = Math.max(...filteredData) ** -1;
+            return filteredData.map((n) => n * multiplier);
+          } catch (error) {
+            console.error("Waveform extraction failed:", error);
+            return null;
+          }
+        };
+
+        const peakHoldLRef = useRef({ val: 0, time: 0 });
+        const peakHoldRRef = useRef({ val: 0, time: 0 });
+
+        // --- Meter Renderer ---
+        const drawMeter = useCallback(() => {
+          if (!analyserLRef.current || !analyserRRef.current || !meterCanvasRef.current) return;
+
+          const canvas = meterCanvasRef.current;
+          const ctx = canvas.getContext("2d");
+          const width = canvas.width;
+          const height = canvas.height;
+
+          const bufferLength = analyserLRef.current.frequencyBinCount;
+          const dataL = new Uint8Array(bufferLength);
+          const dataR = new Uint8Array(bufferLength);
+          analyserLRef.current.getByteFrequencyData(dataL);
+          analyserRRef.current.getByteFrequencyData(dataR);
+
+          ctx.fillStyle = "#121214";
+          ctx.fillRect(0, 0, width, height);
+
+          // Calculate average values
+          let sumL = 0;
+          let sumR = 0;
+          for (let i = 0; i < bufferLength; i++) {
+            sumL += dataL[i];
+            sumR += dataR[i];
+          }
+          const levelL = Math.min(1, (sumL / bufferLength) / 110);
+          const levelR = Math.min(1, (sumR / bufferLength) / 110);
+
+          // Update Peak Holds
+          const now = Date.now();
+          if (levelL > peakHoldLRef.current.val) {
+            peakHoldLRef.current = { val: levelL, time: now };
+          } else if (now - peakHoldLRef.current.time > 800) {
+            peakHoldLRef.current.val = Math.max(0, peakHoldLRef.current.val - 0.008);
+          }
+
+          if (levelR > peakHoldRRef.current.val) {
+            peakHoldRRef.current = { val: levelR, time: now };
+          } else if (now - peakHoldRRef.current.time > 800) {
+            peakHoldRRef.current.val = Math.max(0, peakHoldRRef.current.val - 0.008);
+          }
+
+          // Gradients
+          const grad = ctx.createLinearGradient(0, height, 0, 0);
+          grad.addColorStop(0, "#10b981");    // green
+          grad.addColorStop(0.65, "#f59e0b"); // amber
+          grad.addColorStop(0.85, "#ef4444"); // red
+
+          const barWidth = (width - 4) / 2;
+
+          // Draw Left Channel
+          ctx.fillStyle = "#27272a";
+          ctx.fillRect(0, 0, barWidth, height);
+          ctx.fillStyle = grad;
+          ctx.fillRect(0, height - (levelL * height), barWidth, levelL * height);
+
+          // Draw Right Channel
+          ctx.fillStyle = "#27272a";
+          ctx.fillRect(barWidth + 4, 0, barWidth, height);
+          ctx.fillStyle = grad;
+          ctx.fillRect(barWidth + 4, height - (levelR * height), barWidth, levelR * height);
+
+          // Draw Peak Hold Marks
+          ctx.fillStyle = "#ef4444";
+          if (peakHoldLRef.current.val > 0) {
+            ctx.fillRect(0, height - (peakHoldLRef.current.val * height), barWidth, 2);
+          }
+          if (peakHoldRRef.current.val > 0) {
+            ctx.fillRect(barWidth + 4, height - (peakHoldRRef.current.val * height), barWidth, 2);
+          }
+
+          // Draw dB Scale ticks
+          ctx.strokeStyle = "rgba(255, 255, 255, 0.15)";
+          ctx.lineWidth = 1;
+          ctx.fillStyle = "rgba(255, 255, 255, 0.4)";
+          ctx.font = "8px monospace";
+          
+          const dBs = [0, -6, -12, -20, -30, -40];
+          dBs.forEach(db => {
+            const val = Math.pow(10, db / 20);
+            const y = height - (val * height);
+            
+            ctx.beginPath();
+            ctx.moveTo(0, y);
+            ctx.lineTo(width, y);
+            ctx.stroke();
+
+            if (db === 0 || db === -12 || db === -30) {
+              ctx.fillText(`${db}`, 4, y - 2);
+            }
+          });
+        }, []);
+
+        // --- Logic: Snapping ---
+        const getSnappedTime = useCallback(
+          (proposedTime, excludeClipId = null) => {
+            const state = stateRef.current;
+            if (!state.snapping) {
+              setActiveSnapTime(null);
+              return proposedTime;
+            }
+
+            let bestSnap = proposedTime;
+            let minDistance = CONFIG.snapThresholdPx / state.zoomLevel;
+            let didSnap = false;
+
+            if (Math.abs(proposedTime - 0) < minDistance) {
+              bestSnap = 0;
+              didSnap = true;
+            }
+            if (Math.abs(proposedTime - state.locators.left) < minDistance) {
+              bestSnap = state.locators.left;
+              didSnap = true;
+            }
+            if (Math.abs(proposedTime - state.locators.right) < minDistance) {
+              bestSnap = state.locators.right;
+              didSnap = true;
+            }
+
+            state.markers.forEach((m) => {
+              if (Math.abs(proposedTime - m.time) < minDistance) {
+                bestSnap = m.time;
+                didSnap = true;
+              }
+            });
+
+            Object.values(state.tracks)
+              .flat()
+              .forEach((clip) => {
+                if (clip.id === excludeClipId) return;
+                if (Math.abs(proposedTime - clip.start) < minDistance) {
+                  bestSnap = clip.start;
+                  didSnap = true;
+                }
+                const clipEnd = clip.start + clip.duration;
+                if (Math.abs(proposedTime - clipEnd) < minDistance) {
+                  bestSnap = clipEnd;
+                  didSnap = true;
+                }
+              });
+
+            if (
+              excludeClipId &&
+              Math.abs(proposedTime - state.currentTime) < minDistance
+            ) {
+              bestSnap = state.currentTime;
+              didSnap = true;
+            }
+
+            if (didSnap) {
+              setActiveSnapTime(bestSnap);
+            } else {
+              setActiveSnapTime(null);
+            }
+
+            return bestSnap;
+          },
+          [],
+        );
+
+        // --- Core Engine: Render Loop ---
+        const renderFrame = useCallback(
+          (timeOverride = null, forceSeek = false) => {
+            const ctx = canvasRef.current?.getContext("2d");
+            if (!ctx) return;
+
+            const currentState = stateRef.current;
+            const renderTime = timeOverride ?? currentState.currentTime;
+            const isPlaying = currentState.isPlaying;
+
+            if (masterGainRef.current) {
+              masterGainRef.current.gain.setTargetAtTime(
+                currentState.masterVolume,
+                audioContextRef.current.currentTime,
+                0.1,
+              );
+            }
+
+            drawMeter();
+
+            try {
+              ctx.fillStyle = "#000000";
+              ctx.fillRect(0, 0, CONFIG.width, CONFIG.height);
+
+              const activeClipIds = new Set();
+
+              ["video1", "video2", "video3", "text1"].forEach((trackKey) => {
+                const clips = currentState.tracks[trackKey];
+                const activeClip = clips.find(
+                  (c) =>
+                    renderTime >= c.start && renderTime < c.start + c.duration,
+                );
+
+                if (activeClip) {
+                  activeClipIds.add(activeClip.id);
+
+                  const relativeTime = renderTime - activeClip.start;
+                  let fadeOpacity = 1;
+
+                  if (
+                    activeClip.fadeInDuration > 0 &&
+                    relativeTime < activeClip.fadeInDuration
+                  ) {
+                    fadeOpacity = relativeTime / activeClip.fadeInDuration;
+                  } else if (
+                    activeClip.fadeOutDuration > 0 &&
+                    relativeTime >
+                      activeClip.duration - activeClip.fadeOutDuration
+                  ) {
+                    fadeOpacity =
+                      (activeClip.duration - relativeTime) /
+                      activeClip.fadeOutDuration;
+                  }
+                  fadeOpacity = Math.max(0, Math.min(1, fadeOpacity));
+
+                  const gainNode = audioGainNodesRef.current[activeClip.id];
+                  if (gainNode) {
+                    const finalVol = activeClip.muted ? 0 : (activeClip.volume ?? 1) * fadeOpacity;
+                    gainNode.gain.cancelScheduledValues(0);
+                    gainNode.gain.setValueAtTime(
+                      finalVol,
+                      audioContextRef.current?.currentTime || 0,
+                    );
+                  }
+
+                  ctx.save();
+                  ctx.globalAlpha = fadeOpacity;
+
+                  // Combined Filter String Builder
+                  let filterStr = "none";
+                  if (activeClip.filter && activeClip.filter !== "none") {
+                    filterStr = activeClip.filter;
+                  } else if (
+                    activeClip.brightness !== undefined ||
+                    activeClip.contrast !== undefined ||
+                    activeClip.saturate !== undefined ||
+                    activeClip.hueRotate !== undefined ||
+                    activeClip.blur !== undefined
+                  ) {
+                    const b = activeClip.brightness ?? 100;
+                    const c = activeClip.contrast ?? 100;
+                    const s = activeClip.saturate ?? 100;
+                    const h = activeClip.hueRotate ?? 0;
+                    const bl = activeClip.blur ?? 0;
+                    filterStr = `brightness(${b}%) contrast(${c}%) saturate(${s}%) hue-rotate(${h}deg) blur(${bl}px)`;
+                  }
+
+                  if (activeClip.type === "video") {
+                    const videoEl = videoElementsRef.current[activeClip.id];
+                    if (videoEl) {
+                      // Sync HTML5 media element mute state
+                      videoEl.muted = activeClip.muted || false;
+
+                      const playbackRate = activeClip.speed || 1;
+                      if (videoEl.playbackRate !== playbackRate)
+                        videoEl.playbackRate = playbackRate;
+
+                      let sourceTime;
+                      if (activeClip.reverse) {
+                        sourceTime =
+                          (activeClip.sourceDuration || activeClip.duration) -
+                          (activeClip.offset + relativeTime * playbackRate);
+                      } else {
+                        sourceTime =
+                          activeClip.offset + relativeTime * playbackRate;
+                      }
+
+                      const drift = Math.abs(videoEl.currentTime - sourceTime);
+
+                      if (isPlaying && !activeClip.reverse) {
+                        if (videoEl.paused && videoEl.readyState >= 2)
+                          videoEl.play().catch(() => {});
+                        if (forceSeek || drift > 0.5) {
+                          if (
+                            Number.isFinite(sourceTime) &&
+                            sourceTime >= 0 &&
+                            sourceTime <= videoEl.duration
+                          ) {
+                            videoEl.currentTime = sourceTime;
+                          }
+                        }
+                      } else {
+                        if (!videoEl.paused) videoEl.pause();
+                        if (drift > 0.05) {
+                          if (
+                            Number.isFinite(sourceTime) &&
+                            sourceTime >= 0 &&
+                            sourceTime <= videoEl.duration
+                          ) {
+                            videoEl.currentTime = sourceTime;
+                          }
+                        }
+                      }
+
+                      if (videoEl.readyState >= 2 && !videoEl.seeking) {
+                        if (filterStr !== "none") {
+                          ctx.filter = filterStr;
+                        }
+                        ctx.drawImage(
+                          videoEl,
+                          0,
+                          0,
+                          CONFIG.width,
+                          CONFIG.height,
+                        );
+                        ctx.filter = "none";
+                      }
+                    }
+                  } else if (activeClip.type === "image") {
+                    const imgEl = videoElementsRef.current[activeClip.id];
+                    if (imgEl) {
+                      if (filterStr !== "none") {
+                        ctx.filter = filterStr;
+                      }
+                      ctx.drawImage(imgEl, 0, 0, CONFIG.width, CONFIG.height);
+                      ctx.filter = "none";
+                    }
+                  } else if (activeClip.type === "text") {
+                    const fontFam = activeClip.fontFamily || "Arial";
+                    ctx.font = `${activeClip.fontSize || 100}px ${fontFam}`;
+                    ctx.fillStyle = activeClip.color || "#ffffff";
+                    ctx.textAlign = "center";
+                    ctx.textBaseline = "middle";
+                    const x =
+                      ((activeClip.x !== undefined ? activeClip.x : 50) / 100) *
+                      CONFIG.width;
+                    const y =
+                      ((activeClip.y !== undefined ? activeClip.y : 50) / 100) *
+                      CONFIG.height;
+                    ctx.fillText(activeClip.text || "Text", x, y);
+                  }
+                  ctx.restore();
+                }
+              });
+
+              ["audio1", "audio2"].forEach((trackKey) => {
+                const clips = currentState.tracks[trackKey];
+                const activeClip = clips.find(
+                  (c) =>
+                    renderTime >= c.start && renderTime < c.start + c.duration,
+                );
+
+                if (activeClip) {
+                  activeClipIds.add(activeClip.id);
+                  const el = audioElementsRef.current[activeClip.id];
+                  const gainNode = audioGainNodesRef.current[activeClip.id];
+
+                  if (el && gainNode) {
+                    // Sync audio element muted state
+                    el.muted = activeClip.muted || false;
+
+                    const playbackRate = activeClip.speed || 1;
+                    if (el.playbackRate !== playbackRate)
+                      el.playbackRate = playbackRate;
+
+                    const relativeTime = renderTime - activeClip.start;
+                    const sourceTime =
+                      activeClip.offset + relativeTime * playbackRate;
+                    const drift = Math.abs(el.currentTime - sourceTime);
+
+                    if (isPlaying) {
+                      if (forceSeek || drift > 0.5) el.currentTime = sourceTime;
+                      if (el.paused) el.play().catch((e) => {});
+                    } else {
+                      if (drift > 0.1) el.currentTime = sourceTime;
+                      if (!el.paused) el.pause();
+                    }
+
+                    let vol = activeClip.muted ? 0 : (activeClip.volume ?? 1);
+                    if (
+                      activeClip.fadeInDuration > 0 &&
+                      relativeTime < activeClip.fadeInDuration
+                    ) {
+                      vol *= relativeTime / activeClip.fadeInDuration;
+                    } else if (
+                      activeClip.fadeOutDuration > 0 &&
+                      relativeTime >
+                        activeClip.duration - activeClip.fadeOutDuration
+                    ) {
+                      vol *=
+                        (activeClip.duration - relativeTime) /
+                        activeClip.fadeOutDuration;
+                    }
+
+                    gainNode.gain.cancelScheduledValues(0);
+                    gainNode.gain.setValueAtTime(
+                      Math.max(0, vol),
+                      audioContextRef.current?.currentTime || 0,
+                    );
+                  }
+                }
+              });
+
+              Object.keys(videoElementsRef.current).forEach((id) => {
+                if (!activeClipIds.has(id)) {
+                  const el = videoElementsRef.current[id];
+                  if (el && !el.paused) el.pause();
+                }
+              });
+              Object.keys(audioElementsRef.current).forEach((id) => {
+                if (!activeClipIds.has(id)) {
+                  const el = audioElementsRef.current[id];
+                  if (el && !el.paused) el.pause();
+                }
+              });
+            } catch (err) {
+              console.error("Render error:", err);
+            }
+          },
+          [drawMeter],
+        );
+
+        const copyClip = useCallback(() => {
+          if (selectedClip) setClipboard(selectedClip);
+        }, [selectedClip]);
+
+        const pasteClip = useCallback(() => {
+          if (!clipboard) return;
+          const newId = generateId();
+          const pasteTime = stateRef.current.currentTime;
+
+          const newClip = {
+            ...clipboard,
+            id: newId,
+            start: pasteTime,
+          };
+
+          if (clipboard.type === "video") {
+            let el = videoElementsRef.current[clipboard.id];
+            if (el) {
+              el = el.cloneNode(true);
+            } else {
+              el = document.createElement("video");
+              el.src = clipboard.src;
+              el.crossOrigin = "anonymous";
+              el.preload = "auto";
+              el.playsInline = true;
+            }
+            if (hiddenMediaContainerRef.current)
+              hiddenMediaContainerRef.current.appendChild(el);
+            setupAudioConnection(el, newId);
+            videoElementsRef.current[newId] = el;
+          } else if (clipboard.type === "image") {
+            let el = videoElementsRef.current[clipboard.id];
+            if (!el) {
+              el = new Image();
+              el.src = clipboard.src;
+            }
+            videoElementsRef.current[newId] = el;
+          } else if (clipboard.type === "audio") {
+            let el = audioElementsRef.current[clipboard.id];
+            if (el) {
+              el = el.cloneNode(true);
+            } else {
+              el = document.createElement("audio");
+              el.src = clipboard.src;
+            }
+            if (hiddenMediaContainerRef.current)
+              hiddenMediaContainerRef.current.appendChild(el);
+            setupAudioConnection(el, newId);
+            audioElementsRef.current[newId] = el;
+          }
+
+          const newTracks = {
+            ...stateRef.current.tracks,
+            [clipboard.trackId]: [
+              ...stateRef.current.tracks[clipboard.trackId],
+              newClip,
+            ],
+          };
+          pushHistory(newTracks);
+
+          setSelectedClip({ ...newClip, trackId: clipboard.trackId });
+        }, [clipboard, pushHistory]);
+
+        const cleanupClipResources = useCallback((clipId, src) => {
+          const cleanElement = (el) => {
+            if (!el) return;
+            if (audioSourcesRef.current.has(el)) {
+              try {
+                audioSourcesRef.current.get(el).disconnect();
+              } catch (e) {
+                /* ignore */
+              }
+              audioSourcesRef.current.delete(el);
+            }
+            el.pause();
+            el.removeAttribute("src");
+            el.load();
+            el.remove();
+          };
+
+          if (videoElementsRef.current[clipId]) {
+            cleanElement(videoElementsRef.current[clipId]);
+            delete videoElementsRef.current[clipId];
+          }
+          if (audioElementsRef.current[clipId]) {
+            cleanElement(audioElementsRef.current[clipId]);
+            delete audioElementsRef.current[clipId];
+          }
+          if (audioGainNodesRef.current[clipId]) {
+            try {
+              audioGainNodesRef.current[clipId].disconnect();
+            } catch (e) {
+              /* ignore */
+            }
+            delete audioGainNodesRef.current[clipId];
+          }
+
+          if (src && src.startsWith("blob:")) {
+            const isUsedElsewhere = Object.values(stateRef.current.tracks)
+              .flat()
+              .some((c) => c.id !== clipId && c.src === src);
+            if (!isUsedElsewhere) {
+              URL.revokeObjectURL(src);
+            }
+          }
+        }, []);
+
+        const deleteSelected = useCallback(() => {
+          setSelectedClip((currentSelected) => {
+            if (!currentSelected) return null;
+            cleanupClipResources(currentSelected.id, currentSelected.src);
+            const newTracks = {
+              ...stateRef.current.tracks,
+              [currentSelected.trackId]: stateRef.current.tracks[
+                currentSelected.trackId
+              ].filter((c) => c.id !== currentSelected.id),
+            };
+            pushHistory(newTracks);
+            return null;
+          });
+        }, [cleanupClipResources, pushHistory]);
+
+        useEffect(() => {
+          return () => {
+            isMounted.current = false;
+            const uniqueSrcs = new Set();
+            Object.values(stateRef.current.tracks)
+              .flat()
+              .forEach((c) => {
+                if (c.src && c.src.startsWith("blob:")) uniqueSrcs.add(c.src);
+              });
+            uniqueSrcs.forEach((src) => URL.revokeObjectURL(src));
+          };
+        }, []);
+
+        const updateClipVolume = (newVol) => {
+          if (!selectedClip) return;
+          const vol = parseFloat(newVol);
+          const newTracks = {
+            ...stateRef.current.tracks,
+            [selectedClip.trackId]: stateRef.current.tracks[
+              selectedClip.trackId
+            ].map((c) =>
+              c.id === selectedClip.id ? { ...c, volume: vol } : c,
+            ),
+          };
+          pushHistory(newTracks);
+          setSelectedClip((prev) => ({ ...prev, volume: vol }));
+        };
+
+        const updateFadeProp = (prop, value) => {
+          if (!selectedClip) return;
+          const val = parseFloat(value);
+          if (isNaN(val) || val < 0) return;
+
+          const clip = selectedClip;
+          let newPropValue = val;
+          if (
+            prop === "fadeInDuration" &&
+            val + (clip.fadeOutDuration || 0) > clip.duration
+          ) {
+            newPropValue = clip.duration - (clip.fadeOutDuration || 0);
+          } else if (
+            prop === "fadeOutDuration" &&
+            val + (clip.fadeInDuration || 0) > clip.duration
+          ) {
+            newPropValue = clip.duration - (clip.fadeInDuration || 0);
+          }
+
+          const newTracks = {
+            ...stateRef.current.tracks,
+            [selectedClip.trackId]: stateRef.current.tracks[
+              selectedClip.trackId
+            ].map((c) =>
+              c.id === selectedClip.id ? { ...c, [prop]: newPropValue } : c,
+            ),
+          };
+          pushHistory(newTracks);
+          setSelectedClip((prev) => ({ ...prev, [prop]: newPropValue }));
+        };
+
+        const updateClipSpeed = (newSpeed) => {
+          if (!selectedClip) return;
+          const speed = parseFloat(newSpeed);
+          const newTracks = {
+            ...stateRef.current.tracks,
+            [selectedClip.trackId]: stateRef.current.tracks[
+              selectedClip.trackId
+            ].map((c) =>
+              c.id === selectedClip.id ? { ...c, speed: speed } : c,
+            ),
+          };
+          pushHistory(newTracks);
+          setSelectedClip((prev) => ({ ...prev, speed: speed }));
+        };
+
+        const updateClipFilter = (newFilter) => {
+          if (!selectedClip) return;
+          const newTracks = {
+            ...stateRef.current.tracks,
+            [selectedClip.trackId]: stateRef.current.tracks[
+              selectedClip.trackId
+            ].map((c) =>
+              c.id === selectedClip.id ? { ...c, filter: newFilter } : c,
+            ),
+          };
+          pushHistory(newTracks);
+          setSelectedClip((prev) => ({ ...prev, filter: newFilter }));
+        };
+
+        const updateTextProp = (prop, value) => {
+          if (!selectedClip || selectedClip.type !== "text") return;
+          const newTracks = {
+            ...stateRef.current.tracks,
+            [selectedClip.trackId]: stateRef.current.tracks[
+              selectedClip.trackId
+            ].map((c) =>
+              c.id === selectedClip.id ? { ...c, [prop]: value } : c,
+            ),
+          };
+          pushHistory(newTracks);
+          setSelectedClip((prev) => ({ ...prev, [prop]: value }));
+        };
+
+        const cutClip = () => {
+          if (!selectedClip) return;
+          const curTime = stateRef.current.currentTime;
+          if (
+            curTime <= selectedClip.start ||
+            curTime >= selectedClip.start + selectedClip.duration
+          )
+            return;
+          const splitTime = curTime - selectedClip.start;
+          const speed = selectedClip.speed || 1;
+
+          const track = stateRef.current.tracks[selectedClip.trackId];
+          const newTrack = track.filter((c) => c.id !== selectedClip.id);
+          const firstPart = { ...selectedClip, duration: splitTime };
+          const secondPart = {
+            ...selectedClip,
+            id: generateId(),
+            start: curTime,
+            duration: selectedClip.duration - splitTime,
+            offset: selectedClip.offset + splitTime * speed,
+          };
+          if (selectedClip.type === "video") {
+            const el =
+              videoElementsRef.current[selectedClip.id].cloneNode(true);
+            if (hiddenMediaContainerRef.current)
+              hiddenMediaContainerRef.current.appendChild(el);
+            setupAudioConnection(el, secondPart.id);
+            videoElementsRef.current[secondPart.id] = el;
+          }
+          if (audioElementsRef.current[selectedClip.id]) {
+            const el =
+              audioElementsRef.current[selectedClip.id].cloneNode(true);
+            if (hiddenMediaContainerRef.current)
+              hiddenMediaContainerRef.current.appendChild(el);
+            setupAudioConnection(el, secondPart.id);
+            audioElementsRef.current[secondPart.id] = el;
+          }
+
+          const newTracks = {
+            ...stateRef.current.tracks,
+            [selectedClip.trackId]: [...newTrack, firstPart, secondPart],
+          };
+          pushHistory(newTracks);
+          setSelectedClip(null);
+        };
+
+        const detachAudio = () => {
+          if (!selectedClip || selectedClip.type !== "video") return;
+          const audioId = generateId();
+          const audioClip = {
+            ...selectedClip,
+            id: audioId,
+            type: "audio",
+            trackId: "audio1",
+            name: `Audio: ${selectedClip.name}`,
+          };
+          const audioEl = document.createElement("audio");
+          audioEl.src = selectedClip.src;
+          if (hiddenMediaContainerRef.current)
+            hiddenMediaContainerRef.current.appendChild(audioEl);
+          setupAudioConnection(audioEl, audioId);
+
+          audioElementsRef.current[audioId] = audioEl;
+          const newTracks = {
+            ...stateRef.current.tracks,
+            [selectedClip.trackId]: stateRef.current.tracks[
+              selectedClip.trackId
+            ].map((c) =>
+              c.id === selectedClip.id ? { ...c, muted: true } : c,
+            ),
+            audio1: [...stateRef.current.tracks.audio1, audioClip],
+          };
+          pushHistory(newTracks);
+        };
+
+        const toggleProperty = (prop) => {
+          if (!selectedClip) return;
+          const newTracks = {
+            ...stateRef.current.tracks,
+            [selectedClip.trackId]: stateRef.current.tracks[
+              selectedClip.trackId
+            ].map((c) =>
+              c.id === selectedClip.id ? { ...c, [prop]: !c[prop] } : c,
+            ),
+          };
+          pushHistory(newTracks);
+          setSelectedClip((prev) => ({ ...prev, [prop]: !prev[prop] }));
+        };
+
+        const togglePlay = useCallback(() => {
+          setIsPlaying((prev) => {
+            const nextState = !prev;
+            if (nextState) {
+              initAudio();
+            } else {
+              stateRef.current.isPlaying = false;
+              renderFrame(stateRef.current.currentTime, true);
+              if (audioContextRef.current && audioContextRef.current.state === "running") {
+                  audioContextRef.current.suspend();
+              }
+            }
+            return nextState;
+          });
+        }, [renderFrame]);
+
+        // --- Keyboard Shortcuts ---
+        useEffect(() => {
+          const handleKeyDown = (e) => {
+            if (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA")
+              return;
+
+            if ((e.ctrlKey || e.metaKey) && e.key === "c") {
+              e.preventDefault();
+              copyClip();
+            }
+            if ((e.ctrlKey || e.metaKey) && e.key === "v") {
+              e.preventDefault();
+              pasteClip();
+            }
+            if ((e.ctrlKey || e.metaKey) && e.key === "z" && !e.shiftKey) {
+              e.preventDefault();
+              undo();
+            }
+            if (
+              (e.ctrlKey || e.metaKey) &&
+              (e.key === "y" || (e.key === "z" && e.shiftKey))
+            ) {
+              e.preventDefault();
+              redo();
+            }
+
+            switch (e.key) {
+              case " ":
+                if (!e.repeat) {
+                  e.preventDefault();
+                  togglePlay();
+                }
+                break;
+              case "j":
+              case "J":
+                e.preventDefault();
+                updateTime(Math.max(0, stateRef.current.currentTime - 5));
+                break;
+              case "k":
+              case "K":
+                e.preventDefault();
+                if (stateRef.current.isPlaying) togglePlay();
+                break;
+              case "l":
+              case "L":
+                e.preventDefault();
+                updateTime(Math.min(stateRef.current.duration, stateRef.current.currentTime + 5));
+                break;
+              case "i":
+              case "I":
+                e.preventDefault();
+                setLocators((p) => ({ ...p, left: stateRef.current.currentTime }));
+                break;
+              case "o":
+              case "O":
+                e.preventDefault();
+                setLocators((p) => ({ ...p, right: stateRef.current.currentTime }));
+                break;
+              case "ArrowLeft":
+                e.preventDefault();
+                updateTime(Math.max(0, stateRef.current.currentTime - 0.1));
+                break;
+              case "ArrowRight":
+                e.preventDefault();
+                updateTime(Math.min(stateRef.current.duration, stateRef.current.currentTime + 0.1));
+                break;
+              case "1":
+                updateTime(stateRef.current.locators.left);
+                break;
+              case "2":
+                updateTime(stateRef.current.locators.right);
+                break;
+              case "m":
+              case "M":
+                setMarkers((prev) => [
+                  ...prev,
+                  { id: generateId(), time: stateRef.current.currentTime },
+                ]);
+                break;
+              case "Delete":
+              case "Backspace":
+                deleteSelected();
+                break;
+              default:
+                break;
+            }
+          };
+          window.addEventListener("keydown", handleKeyDown);
+          return () => window.removeEventListener("keydown", handleKeyDown);
+        }, [selectedClip, updateTime, deleteSelected, copyClip, pasteClip, undo, redo, togglePlay]);
+
+        // --- Animation Loop ---
+        const animate = useCallback(
+          (time) => {
+            const currentState = stateRef.current;
+
+            if (currentState.isPlaying) {
+              if (!currentState.lastTime) currentState.lastTime = time;
+              const deltaTime = (time - currentState.lastTime) / 1000;
+              currentState.lastTime = time;
+              const effectiveDelta = Math.min(deltaTime, 0.1);
+
+              let nextTime = currentState.currentTime + effectiveDelta;
+              let forceSeek = false;
+
+              if (
+                currentState.isRendering &&
+                nextTime >= currentState.locators.right
+              ) {
+                if (
+                  mediaRecorderRef.current &&
+                  mediaRecorderRef.current.state === "recording"
+                ) {
+                  mediaRecorderRef.current.stop();
+                }
+                setIsPlaying(false);
+                setIsRendering(false);
+                stateRef.current.isPlaying = false;
+                stateRef.current.isRendering = false;
+                stateRef.current.lastTime = 0;
+                setExportProgress(100);
+                return;
+              }
+
+              if (
+                !currentState.isRendering &&
+                currentState.isLooping &&
+                currentState.currentTime < currentState.locators.right &&
+                nextTime >= currentState.locators.right
+              ) {
+                nextTime = currentState.locators.left;
+                forceSeek = true;
+              } else if (
+                !currentState.isRendering &&
+                nextTime >= currentState.duration
+              ) {
+                setIsPlaying(false);
+                stateRef.current.isPlaying = false;
+                stateRef.current.lastTime = 0;
+                return;
+              }
+
+              if (currentState.isRendering) {
+                const totalDuration = currentState.locators.right - currentState.locators.left;
+                const elapsed = nextTime - currentState.locators.left;
+                const progress = Math.max(0, Math.min(99, (elapsed / (totalDuration || 1)) * 100));
+                setExportProgress(progress);
+              }
+
+              stateRef.current.currentTime = nextTime;
+              renderFrame(nextTime, forceSeek);
+              requestRef.current = requestAnimationFrame(animate);
+              setCurrentTime(nextTime);
+
+              // Center playhead in timeline during playback
+              if (timelineContainerRef.current) {
+                const container = timelineContainerRef.current;
+                const playheadPx = nextTime * stateRef.current.zoomLevel;
+                const headerWidth = 100;
+                const viewWidth = container.clientWidth;
+                const playheadPos = headerWidth + playheadPx;
+                const centerOffset = viewWidth / 2;
+                container.scrollLeft = Math.max(0, playheadPos - centerOffset);
+              }
+            } else {
+              currentState.lastTime = 0;
+              requestRef.current = requestAnimationFrame(animate);
+              drawMeter();
+            }
+          },
+          [renderFrame, drawMeter],
+        );
+
+        useEffect(() => {
+          requestRef.current = requestAnimationFrame(animate);
+          return () => cancelAnimationFrame(requestRef.current);
+        }, [animate]);
+
+        // --- FIX: Timeline Wheel Handler (zoom + horizontal scroll) ---
+        // Attach AFTER mount so the ref exists, and re-bind if the ref ever changes.
+        // Using a layout effect-style attachment with the actual DOM element.
+        useEffect(() => {
+          const container = timelineContainerRef.current;
+          if (!container) return;
+
+          const handleWheel = (e) => {
+            // Ctrl/Cmd/Alt + wheel = zoom timeline (and prevent browser page zoom)
+            if (e.ctrlKey || e.metaKey || e.altKey) {
+              e.preventDefault();
+              e.stopPropagation();
+
+              // Anchor zoom around the cursor position so it feels natural
+              const rect = container.getBoundingClientRect();
+              const cursorX = e.clientX - rect.left;
+              const headerWidth = 100;
+              const timeAtCursor =
+                (container.scrollLeft + cursorX - headerWidth) /
+                stateRef.current.zoomLevel;
+
+              setZoomLevel((prev) => {
+                const next = Math.min(
+                  200,
+                  Math.max(1, prev + e.deltaY * -0.05 * Math.max(1, prev / 20)),
+                );
+
+                // After zoom changes, adjust scroll so the time under the cursor stays put
+                requestAnimationFrame(() => {
+                  if (timelineContainerRef.current) {
+                    const newScrollLeft =
+                      timeAtCursor * next - cursorX + headerWidth;
+                    timelineContainerRef.current.scrollLeft = Math.max(
+                      0,
+                      newScrollLeft,
+                    );
+                  }
+                });
+
+                return next;
+              });
+              return;
+            }
+
+            // Shift + wheel = horizontal scroll
+            if (e.shiftKey) {
+              e.preventDefault();
+              container.scrollLeft += e.deltaY;
+              return;
+            }
+
+            // Plain wheel: convert horizontal trackpad delta to scrollLeft,
+            // let vertical delta scroll naturally (don't preventDefault).
+            if (Math.abs(e.deltaX) > Math.abs(e.deltaY)) {
+              // Trackpad horizontal swipe — browser handles this natively,
+              // but on some setups it's not, so help it along.
+              // Don't preventDefault — let native scroll work too.
+            }
+            // Vertical: let native overflow-y handle it. No preventDefault.
+          };
+
+          container.addEventListener("wheel", handleWheel, { passive: false });
+          return () => container.removeEventListener("wheel", handleWheel);
+        }, []); // ref is stable; one-time attach is correct
+
+        // --- Handlers ---
+        const handleFileImport = (e, type) => {
+          const file = e.target.files[0];
+          if (!file) return;
+          const url = URL.createObjectURL(file);
+          const assetId = generateId();
+
+          if (type === "video" || type === "audio") {
+            const el = document.createElement(type);
+            el.src = url;
+            el.crossOrigin = "anonymous";
+            el.preload = "auto";
+            el.playsInline = true;
+
+            el.onerror = () => {
+              alert(`Error loading ${file.name}. The file codec may not be supported by your browser. Supported formats typically include MP4 (H.264/AAC) and WebM (VP8/VP9).`);
+            };
+
+            if (hiddenMediaContainerRef.current)
+              hiddenMediaContainerRef.current.appendChild(el);
+            setupAudioConnection(el, assetId);
+
+            el.onloadedmetadata = () => {
+              const newAsset = {
+                id: assetId,
+                type,
+                src: url,
+                name: file.name,
+                duration: el.duration,
+                waveform: null,
+              };
+
+              setAssets((prev) => [...prev, newAsset]);
+              setIsLibraryOpen(true);
+
+              const newClip = {
+                id: assetId,
+                type,
+                src: url,
+                start: stateRef.current.currentTime,
+                duration: el.duration,
+                sourceDuration: el.duration,
+                offset: 0,
+                fadeInDuration: 0,
+                fadeOutDuration: 0,
+                reverse: false,
+                muted: false,
+                volume: 1.0,
+                speed: 1.0,
+                filter: "none",
+                name: file.name,
+                waveform: null,
+              };
+
+              if (type === "audio") {
+                extractWaveform(url).then((waveform) => {
+                  if (!isMounted.current) return;
+                  setAssets((prev) =>
+                    prev.map((a) => (a.id === assetId ? { ...a, waveform } : a))
+                  );
+                  setTracks((prev) => {
+                    const updatedTracks = { ...prev };
+                    ["audio1", "audio2"].forEach((tk) => {
+                      updatedTracks[tk] = updatedTracks[tk].map((c) =>
+                        c.id === assetId ? { ...c, waveform } : c,
+                      );
+                    });
+                    return updatedTracks;
+                  });
+                });
+              }
+
+              const targetTrack = type === "audio" ? "audio1" : "video1";
+              if (type === "audio") audioElementsRef.current[assetId] = el;
+              else videoElementsRef.current[assetId] = el;
+
+              const newTracks = {
+                ...stateRef.current.tracks,
+                [targetTrack]: [
+                  ...stateRef.current.tracks[targetTrack],
+                  newClip,
+                ],
+              };
+              pushHistory(newTracks);
+            };
+          } else if (type === "image") {
+            const img = new Image();
+            img.src = url;
+            img.onload = () => {
+              const newAsset = {
+                id: assetId,
+                type,
+                src: url,
+                name: file.name,
+                duration: 5,
+                waveform: null,
+              };
+
+              setAssets((prev) => [...prev, newAsset]);
+              setIsLibraryOpen(true);
+
+              const newClip = {
+                id: assetId,
+                type,
+                src: url,
+                start: stateRef.current.currentTime,
+                duration: 5,
+                offset: 0,
+                fadeInDuration: 0,
+                fadeOutDuration: 0,
+                reverse: false,
+                speed: 1.0,
+                filter: "none",
+                name: file.name,
+              };
+              videoElementsRef.current[assetId] = img;
+              const newTracks = {
+                ...stateRef.current.tracks,
+                video1: [...stateRef.current.tracks.video1, newClip],
+              };
+              pushHistory(newTracks);
+            };
+          }
+        };
+
+        const insertAsset = (asset) => {
+          const clipId = generateId();
+          const newClip = {
+            id: clipId,
+            type: asset.type,
+            src: asset.src,
+            start: stateRef.current.currentTime,
+            duration: asset.duration || 5,
+            sourceDuration: asset.duration,
+            offset: 0,
+            fadeInDuration: 0,
+            fadeOutDuration: 0,
+            reverse: false,
+            muted: false,
+            volume: 1.0,
+            speed: 1.0,
+            filter: "none",
+            name: asset.name,
+            waveform: asset.waveform || null,
+          };
+
+          if (asset.type === "video") {
+            const el = document.createElement("video");
+            el.src = asset.src;
+            el.crossOrigin = "anonymous";
+            el.preload = "auto";
+            el.playsInline = true;
+            if (hiddenMediaContainerRef.current)
+              hiddenMediaContainerRef.current.appendChild(el);
+            setupAudioConnection(el, clipId);
+            videoElementsRef.current[clipId] = el;
+          } else if (asset.type === "audio") {
+            const el = document.createElement("audio");
+            el.src = asset.src;
+            if (hiddenMediaContainerRef.current)
+              hiddenMediaContainerRef.current.appendChild(el);
+            setupAudioConnection(el, clipId);
+            audioElementsRef.current[clipId] = el;
+          } else if (asset.type === "image") {
+            const el = new Image();
+            el.src = asset.src;
+            videoElementsRef.current[clipId] = el;
+          }
+
+          const targetTrack = asset.type === "audio" ? "audio1" : "video1";
+          const newTracks = {
+            ...stateRef.current.tracks,
+            [targetTrack]: [
+              ...stateRef.current.tracks[targetTrack],
+              newClip,
+            ],
+          };
+          pushHistory(newTracks);
+        };
+
+        const deleteAsset = (assetId) => {
+          setAssets((prev) => prev.filter((a) => a.id !== assetId));
+        };
+
+        const toggleMuteClip = () => {
+          if (!selectedClip) return;
+          const newMute = !selectedClip.muted;
+          const newTracks = {
+            ...stateRef.current.tracks,
+            [selectedClip.trackId]: stateRef.current.tracks[
+              selectedClip.trackId
+            ].map((c) =>
+              c.id === selectedClip.id ? { ...c, muted: newMute } : c,
+            ),
+          };
+          pushHistory(newTracks);
+          setSelectedClip((prev) => ({ ...prev, muted: newMute }));
+        };
+
+        const updateClipFilterVal = (name, val) => {
+          if (!selectedClip) return;
+          const numVal = parseFloat(val);
+          const newTracks = {
+            ...stateRef.current.tracks,
+            [selectedClip.trackId]: stateRef.current.tracks[
+              selectedClip.trackId
+            ].map((c) =>
+              c.id === selectedClip.id ? { ...c, [name]: numVal } : c,
+            ),
+          };
+          pushHistory(newTracks);
+          setSelectedClip((prev) => ({ ...prev, [name]: numVal }));
+        };
+
+        const resetClipFilters = () => {
+          if (!selectedClip) return;
+          const newTracks = {
+            ...stateRef.current.tracks,
+            [selectedClip.trackId]: stateRef.current.tracks[
+              selectedClip.trackId
+            ].map((c) => {
+              if (c.id !== selectedClip.id) return c;
+              const updated = { ...c };
+              delete updated.brightness;
+              delete updated.contrast;
+              delete updated.saturate;
+              delete updated.hueRotate;
+              delete updated.blur;
+              updated.filter = "none";
+              return updated;
+            }),
+          };
+          pushHistory(newTracks);
+          setSelectedClip((prev) => {
+            const updated = { ...prev };
+            delete updated.brightness;
+            delete updated.contrast;
+            delete updated.saturate;
+            delete updated.hueRotate;
+            delete updated.blur;
+            updated.filter = "none";
+            return updated;
+          });
+        };
+
+        const handleTrimMouseDown = (e, clip, trackId, side) => {
+          e.stopPropagation();
+          e.preventDefault();
+          setSelectedClip({ ...clip, trackId });
+
+          const mode = e.shiftKey ? "fade" : "trim";
+
+          preDragState.current = JSON.parse(
+            JSON.stringify(stateRef.current.tracks),
+          );
+          setTrimming({
+            mode,
+            id: clip.id,
+            trackId: trackId,
+            side: side,
+            startX: e.clientX,
+            originalStart: clip.start,
+            originalDuration: clip.duration,
+            originalOffset: clip.offset,
+            originalFadeIn: clip.fadeInDuration || 0,
+            originalFadeOut: clip.fadeOutDuration || 0,
+            sourceDuration: clip.sourceDuration || Infinity,
+          });
+        };
+
+        const handleClipMouseDown = (e, clip, trackId) => {
+          e.stopPropagation();
+          e.preventDefault();
+          setSelectedClip({ ...clip, trackId });
+          preDragState.current = JSON.parse(
+            JSON.stringify(stateRef.current.tracks),
+          );
+          setDraggingClip({
+            id: clip.id,
+            trackId,
+            startX: e.clientX,
+            originalStart: clip.start,
+          });
+        };
+
+        const handleLocatorMouseDown = (e, type) => {
+          e.stopPropagation();
+          e.preventDefault();
+          setDraggingLocator({
+            type,
+            startX: e.clientX,
+            originalTime: type === "left" ? locators.left : locators.right,
+          });
+        };
+
+        useEffect(() => {
+          const handleMouseMove = (e) => {
+            if (draggingLocator) {
+              const deltaX = e.clientX - draggingLocator.startX;
+              const deltaTime = deltaX / zoomLevel;
+              let newTime = Math.max(
+                0,
+                draggingLocator.originalTime + deltaTime,
+              );
+              newTime = getSnappedTime(newTime);
+              setLocators((prev) => ({
+                ...prev,
+                [draggingLocator.type]: newTime,
+              }));
+              return;
+            }
+
+            if (trimming) {
+              const deltaX = e.clientX - trimming.startX;
+              const deltaTime = deltaX / zoomLevel;
+
+              if (trimming.mode === "fade") {
+                if (trimming.side === "left") {
+                  let newFade = Math.max(
+                    0,
+                    trimming.originalFadeIn + deltaTime,
+                  );
+                  newFade = Math.min(newFade, trimming.originalDuration);
+                  setTracks((prev) => ({
+                    ...prev,
+                    [trimming.trackId]: prev[trimming.trackId].map((c) =>
+                      c.id === trimming.id
+                        ? { ...c, fadeInDuration: newFade }
+                        : c,
+                    ),
+                  }));
+                  setSelectedClip((prev) =>
+                    prev && prev.id === trimming.id
+                      ? { ...prev, fadeInDuration: newFade }
+                      : prev,
+                  );
+                } else {
+                  let newFade = Math.max(
+                    0,
+                    trimming.originalFadeOut - deltaTime,
+                  );
+                  newFade = Math.min(newFade, trimming.originalDuration);
+                  setTracks((prev) => ({
+                    ...prev,
+                    [trimming.trackId]: prev[trimming.trackId].map((c) =>
+                      c.id === trimming.id
+                        ? { ...c, fadeOutDuration: newFade }
+                        : c,
+                    ),
+                  }));
+                  setSelectedClip((prev) =>
+                    prev && prev.id === trimming.id
+                      ? { ...prev, fadeOutDuration: newFade }
+                      : prev,
+                  );
+                }
+              } else {
+                if (trimming.side === "left") {
+                  let newStart = trimming.originalStart + deltaTime;
+                  newStart = getSnappedTime(newStart, trimming.id);
+                  const effectiveDelta = newStart - trimming.originalStart;
+                  let newDuration = trimming.originalDuration - effectiveDelta;
+                  let newOffset = trimming.originalOffset + effectiveDelta;
+
+                  if (newOffset < 0) {
+                    newOffset = 0;
+                    newStart = trimming.originalStart - trimming.originalOffset;
+                    newDuration =
+                      trimming.originalDuration + trimming.originalOffset;
+                  }
+                  if (newDuration < CONFIG.minClipDuration) {
+                    newDuration = CONFIG.minClipDuration;
+                    newStart =
+                      trimming.originalStart +
+                      trimming.originalDuration -
+                      CONFIG.minClipDuration;
+                    newOffset =
+                      trimming.originalOffset +
+                      trimming.originalDuration -
+                      CONFIG.minClipDuration;
+                  }
+
+                  setTracks((prev) => ({
+                    ...prev,
+                    [trimming.trackId]: prev[trimming.trackId].map((c) =>
+                      c.id === trimming.id
+                        ? {
+                            ...c,
+                            start: newStart,
+                            duration: newDuration,
+                            offset: newOffset,
+                          }
+                        : c,
+                    ),
+                  }));
+                  setSelectedClip((prev) =>
+                    prev && prev.id === trimming.id
+                      ? {
+                          ...prev,
+                          start: newStart,
+                          duration: newDuration,
+                          offset: newOffset,
+                        }
+                      : prev,
+                  );
+                } else {
+                  let newDuration = trimming.originalDuration + deltaTime;
+                  let proposedEnd = trimming.originalStart + newDuration;
+                  let snappedEnd = getSnappedTime(proposedEnd, trimming.id);
+                  newDuration = snappedEnd - trimming.originalStart;
+
+                  if (newDuration < CONFIG.minClipDuration)
+                    newDuration = CONFIG.minClipDuration;
+                  if (
+                    trimming.originalOffset + newDuration >
+                    trimming.sourceDuration
+                  )
+                    newDuration =
+                      trimming.sourceDuration - trimming.originalOffset;
+
+                  setTracks((prev) => ({
+                    ...prev,
+                    [trimming.trackId]: prev[trimming.trackId].map((c) =>
+                      c.id === trimming.id
+                        ? { ...c, duration: newDuration }
+                        : c,
+                    ),
+                  }));
+                  setSelectedClip((prev) =>
+                    prev && prev.id === trimming.id
+                      ? { ...prev, duration: newDuration }
+                      : prev,
+                  );
+                }
+              }
+              return;
+            }
+
+            if (draggingClip) {
+              const deltaX = e.clientX - draggingClip.startX;
+              const deltaTime = deltaX / zoomLevel;
+              let newStart = Math.max(
+                0,
+                draggingClip.originalStart + deltaTime,
+              );
+              newStart = getSnappedTime(newStart, draggingClip.id);
+
+              const tracksRect =
+                tracksContainerRef.current?.getBoundingClientRect();
+              if (tracksRect) {
+                const relativeY =
+                  e.clientY -
+                  tracksRect.top +
+                  (tracksContainerRef.current.scrollTop || 0);
+                const trackIndex = Math.floor(relativeY / CONFIG.trackHeight);
+
+                if (trackIndex >= 0 && trackIndex < TRACK_ORDER.length) {
+                  const newTrackId = TRACK_ORDER[trackIndex];
+                  if (newTrackId !== draggingClip.trackId) {
+                    setTracks((prev) => {
+                      const clip = prev[draggingClip.trackId].find(
+                        (c) => c.id === draggingClip.id,
+                      );
+                      if (!clip) return prev;
+                      const newClip = { ...clip, start: newStart };
+                      return {
+                        ...prev,
+                        [draggingClip.trackId]: prev[
+                          draggingClip.trackId
+                        ].filter((c) => c.id !== draggingClip.id),
+                        [newTrackId]: [...prev[newTrackId], newClip],
+                      };
+                    });
+                    setDraggingClip((prev) => ({
+                      ...prev,
+                      trackId: newTrackId,
+                    }));
+                    setSelectedClip((prev) => ({
+                      ...prev,
+                      trackId: newTrackId,
+                      start: newStart,
+                    }));
+                    return;
+                  }
+                }
+              }
+
+              setTracks((prev) => ({
+                ...prev,
+                [draggingClip.trackId]: prev[draggingClip.trackId].map((c) =>
+                  c.id === draggingClip.id ? { ...c, start: newStart } : c,
+                ),
+              }));
+              setSelectedClip((prev) =>
+                prev && prev.id === draggingClip.id
+                  ? { ...prev, start: newStart }
+                  : prev,
+              );
+            }
+          };
+
+          const handleMouseUp = () => {
+            if (draggingClip || trimming) {
+              if (
+                preDragState.current &&
+                JSON.stringify(preDragState.current) !==
+                  JSON.stringify(stateRef.current.tracks)
+              ) {
+                setHistory((prev) => ({
+                  past: [...prev.past, preDragState.current],
+                  future: [],
+                }));
+              }
+              preDragState.current = null;
+            }
+            setDraggingClip(null);
+            setDraggingLocator(null);
+            setTrimming(null);
+            setActiveSnapTime(null);
+          };
+
+          if (draggingClip || draggingLocator || trimming) {
+            window.addEventListener("mousemove", handleMouseMove);
+            window.addEventListener("mouseup", handleMouseUp);
+          }
+          return () => {
+            window.removeEventListener("mousemove", handleMouseMove);
+            window.removeEventListener("mouseup", handleMouseUp);
+          };
+        }, [
+          draggingClip,
+          draggingLocator,
+          trimming,
+          getSnappedTime,
+          zoomLevel,
+        ]);
+
+        // FIX: total track stack height — needed so the parent scroll container
+        // gets a real scrollHeight and vertical scrolling works.
+        const trackStackHeight = TRACK_ORDER.length * CONFIG.trackHeight;
+        // FIX: total timeline content width based on duration & zoom + header
+        const timelineContentWidth = duration * zoomLevel + 200;
+
+        return (
+          <div className="flex flex-col h-screen bg-[#08080a] text-neutral-200 font-sans overflow-hidden select-none">
+            <div
+              ref={hiddenMediaContainerRef}
+              style={{ display: "none" }}
+            ></div>
+
+            {/* Premium Export Modal */}
+            {isRendering && (
+              <div className="fixed inset-0 z-[120] bg-black/90 flex items-center justify-center p-6 backdrop-blur-md">
+                <div className="bg-[#121217] border border-neutral-800 p-8 rounded-2xl max-w-md w-full shadow-2xl flex flex-col items-center text-center">
+                  <div className="w-16 h-16 bg-blue-600/10 text-blue-500 rounded-full flex items-center justify-center mb-6 animate-pulse border border-blue-500/20">
+                    <Download className="w-8 h-8" />
+                  </div>
+                  <h3 className="text-xl font-bold text-white mb-2">Rendering Video</h3>
+                  <p className="text-sm text-neutral-400 mb-6">
+                    Capturing timeline from {formatTime(locators.left)} to {formatTime(locators.right)} ({exportFormat.toUpperCase()})
+                  </p>
+                  
+                  {/* Progress Bar */}
+                  <div className="w-full bg-neutral-800 h-2.5 rounded-full overflow-hidden mb-3">
+                    <div 
+                      className="bg-gradient-to-r from-blue-500 to-indigo-500 h-full transition-all duration-100 ease-out"
+                      style={{ width: `${exportProgress}%` }}
+                    ></div>
+                  </div>
+                  
+                  <div className="flex justify-between w-full text-xs font-mono text-neutral-500 mb-8">
+                    <span>{exportProgress.toFixed(0)}% Complete</span>
+                    <span>ETA: {Math.ceil(((100 - exportProgress) * (locators.right - locators.left)) / 100)}s</span>
+                  </div>
+
+                  <button
+                    onClick={() => {
+                      if (mediaRecorderRef.current && mediaRecorderRef.current.state === "recording") {
+                        mediaRecorderRef.current.stop();
+                      }
+                      setIsPlaying(false);
+                      setIsRendering(false);
+                    }}
+                    className="px-6 py-2 bg-red-950/40 border border-red-900/60 hover:bg-red-900/50 text-red-200 rounded-lg text-sm font-medium transition-colors"
+                  >
+                    Cancel Export
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* Help Overlay */}
+            {showHelp && (
+              <div
+                className="fixed inset-0 z-[100] bg-black/85 flex items-center justify-center p-10 backdrop-blur-md"
+                onClick={() => setShowHelp(false)}
+              >
+                <div
+                  className="bg-[#121217] p-8 rounded-2xl max-w-4xl w-full shadow-2xl border border-neutral-800 max-h-[85vh] overflow-y-auto"
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  <div className="flex justify-between items-start mb-6">
+                    <h2 className="text-2xl font-bold text-white flex items-center gap-2">
+                      <Activity className="text-blue-500" /> EverCut Pro Help & Guide
+                    </h2>
+                    <button
+                      onClick={() => setShowHelp(false)}
+                      className="text-neutral-400 hover:text-white p-1 hover:bg-neutral-800 rounded animate-colors"
+                    >
+                      <X />
+                    </button>
+                  </div>
+                  <div className="grid grid-cols-2 gap-8 text-sm text-neutral-300">
+                    <div>
+                      <h3 className="font-bold text-white mb-2 border-b border-neutral-800 pb-1 flex items-center gap-1.5">
+                        <Keyboard className="w-4 h-4 text-blue-400" /> Keyboard Shortcuts
+                      </h3>
+                      <ul className="space-y-2 font-mono text-xs">
+                        <li className="flex justify-between border-b border-neutral-900/50 pb-1">
+                          <span>Play / Pause</span>
+                          <kbd className="bg-neutral-800 px-1.5 py-0.5 rounded text-neutral-300 border border-neutral-700">Space</kbd>
+                        </li>
+                        <li className="flex justify-between border-b border-neutral-900/50 pb-1">
+                          <span>Go to IN Point</span>
+                          <kbd className="bg-neutral-800 px-1.5 py-0.5 rounded text-neutral-300 border border-neutral-700">1</kbd>
+                        </li>
+                        <li className="flex justify-between border-b border-neutral-900/50 pb-1">
+                          <span>Go to OUT Point</span>
+                          <kbd className="bg-neutral-800 px-1.5 py-0.5 rounded text-neutral-300 border border-neutral-700">2</kbd>
+                        </li>
+                        <li className="flex justify-between border-b border-neutral-900/50 pb-1">
+                          <span>Delete Clip</span>
+                          <kbd className="bg-neutral-800 px-1.5 py-0.5 rounded text-neutral-300 border border-neutral-700">Del / Backspace</kbd>
+                        </li>
+                        <li className="flex justify-between border-b border-neutral-900/50 pb-1">
+                          <span>Add Marker</span>
+                          <kbd className="bg-neutral-800 px-1.5 py-0.5 rounded text-neutral-300 border border-neutral-700">M</kbd>
+                        </li>
+                        <li className="flex justify-between border-b border-neutral-900/50 pb-1">
+                          <span>Zoom Timeline</span>
+                          <kbd className="bg-neutral-800 px-1.5 py-0.5 rounded text-neutral-300 border border-neutral-700">Ctrl / Cmd + Wheel</kbd>
+                        </li>
+                        <li className="flex justify-between border-b border-neutral-900/50 pb-1">
+                          <span>Scroll Timeline</span>
+                          <kbd className="bg-neutral-800 px-1.5 py-0.5 rounded text-neutral-300 border border-neutral-700">Shift + Wheel</kbd>
+                        </li>
+                        <li className="flex justify-between border-b border-neutral-900/50 pb-1">
+                          <span>Undo / Redo</span>
+                          <kbd className="bg-neutral-800 px-1.5 py-0.5 rounded text-neutral-300 border border-neutral-700">Cmd+Z / Cmd+Shift+Z</kbd>
+                        </li>
+                      </ul>
+                      <div className="mt-6 bg-blue-950/20 border border-blue-900/40 p-4 rounded-xl text-xs text-blue-300 font-sans">
+                        <strong>Pro Tip:</strong> Click a clip to select it, then adjust visual filters (brightness, saturation, contrast, blur) and fades directly in the Right Inspector Panel!
+                      </div>
+                    </div>
+                    <div className="space-y-4">
+                      <div>
+                        <h3 className="font-bold text-white mb-2 border-b border-neutral-800 pb-1">
+                          Format & Codec Support
+                        </h3>
+                        <ul className="text-xs space-y-1.5">
+                          <li className="flex gap-2">
+                            <strong className="text-blue-400 w-16 flex-shrink-0">Video:</strong>
+                            <span className="text-neutral-400">MP4 (H.264/AAC), WebM (VP8/VP9/Opus). Codec support depends on your browser.</span>
+                          </li>
+                          <li className="flex gap-2">
+                            <strong className="text-green-400 w-16 flex-shrink-0">Image:</strong>
+                            <span className="text-neutral-400">PNG, JPG/JPEG, GIF, WebP.</span>
+                          </li>
+                          <li className="flex gap-2">
+                            <strong className="text-purple-400 w-16 flex-shrink-0">Audio:</strong>
+                            <span className="text-neutral-400">MP3, WAV, OGG, M4A, AAC.</span>
+                          </li>
+                        </ul>
+                      </div>
+                      <div>
+                        <h3 className="font-bold text-white mb-2 border-b border-neutral-800 pb-1">
+                          Professional Workflows
+                        </h3>
+                        <ul className="text-xs space-y-2">
+                          <li className="flex items-start gap-1">
+                            <span className="text-blue-500 font-bold">•</span>
+                            <span><strong>Split Clips:</strong> Position the playhead inside a clip and click <strong>Split</strong> on the toolbar (or press shortcut).</span>
+                          </li>
+                          <li className="flex items-start gap-1">
+                            <span className="text-blue-500 font-bold">•</span>
+                            <span><strong>Audio Fades:</strong> Shift + Drag the left/right edges of a clip to add fading transitions, or adjust them mathematically in the Inspector.</span>
+                          </li>
+                          <li className="flex items-start gap-1">
+                            <span className="text-blue-500 font-bold">•</span>
+                            <span><strong>Snapping:</strong> Turn on Snapping (magnet icon) to snap clip starts, ends, locators, and playhead to active edges/markers with a yellow snapping guide.</span>
+                          </li>
+                        </ul>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Top Navigation Bar */}
+            <header className="h-14 border-b border-neutral-800/80 flex items-center justify-between px-6 bg-[#0c0c10]/95 backdrop-blur-md z-40">
+              <div className="flex items-center gap-3">
+                <div className="w-8 h-8 rounded-lg bg-gradient-to-tr from-blue-600 to-indigo-600 flex items-center justify-center shadow-[0_0_12px_rgba(37,99,235,0.4)] border border-blue-500/20">
+                  <Activity className="w-5 h-5 text-white" />
+                </div>
+                <div className="flex flex-col">
+                  <span className="font-bold text-base tracking-wide text-white leading-none">
+                    EverCut Pro
+                  </span>
+                  <span className="text-[10px] text-neutral-500 font-mono mt-0.5">
+                    NLE EDITOR
+                  </span>
+                </div>
+              </div>
+
+              {/* Center Playback Position Info */}
+              <div className="flex items-center gap-4 bg-neutral-900/60 px-4 py-1.5 rounded-full border border-neutral-800">
+                <div className="flex items-center gap-1.5 text-xs text-neutral-400">
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>
+                  <span>Playhead:</span>
+                  <span className="font-mono text-blue-400 font-bold ml-1">{formatTime(currentTime)}</span>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-4">
+                <button
+                  onClick={() => setShowHelp(true)}
+                  className="flex items-center gap-1.5 text-neutral-400 hover:text-white text-sm font-medium transition-colors p-1.5 hover:bg-neutral-800 rounded-lg animate-colors"
+                >
+                  <HelpCircle className="w-4 h-4" /> Help
+                </button>
+
+                {/* Undo/Redo */}
+                <div className="flex items-center bg-neutral-900/80 rounded-lg p-0.5 border border-neutral-800">
+                  <button
+                    onClick={undo}
+                    disabled={history.past.length === 0}
+                    className={`p-1.5 rounded-md text-neutral-400 hover:text-white hover:bg-neutral-800 transition-colors ${history.past.length === 0 ? "opacity-30 cursor-not-allowed" : ""}`}
+                    title="Undo (Cmd+Z)"
+                  >
+                    <Undo className="w-4 h-4" />
+                  </button>
+                  <div className="w-px h-4 bg-neutral-800"></div>
+                  <button
+                    onClick={redo}
+                    disabled={history.future.length === 0}
+                    className={`p-1.5 rounded-md text-neutral-400 hover:text-white hover:bg-neutral-800 transition-colors ${history.future.length === 0 ? "opacity-30 cursor-not-allowed" : ""}`}
+                    title="Redo (Cmd+Shift+Z)"
+                  >
+                    <Redo className="w-4 h-4" />
+                  </button>
+                </div>
+
+                {/* Inspector Toggle */}
+                <button
+                  onClick={() => setIsInspectorOpen(!isInspectorOpen)}
+                  className={`p-2 rounded-lg border transition-all ${isInspectorOpen ? "bg-blue-600/10 border-blue-500/30 text-blue-400" : "bg-neutral-900 border-neutral-800 text-neutral-400 hover:text-white"}`}
+                  title="Toggle Inspector Panel"
+                >
+                  <Settings className="w-4 h-4" />
+                </button>
+
+                <div className="flex items-center bg-neutral-900 border border-neutral-800 rounded-lg p-0.5">
+                  <select
+                    value={exportFormat}
+                    onChange={(e) => setExportFormat(e.target.value)}
+                    className="bg-transparent text-xs text-white px-3 py-1.5 outline-none cursor-pointer font-medium"
+                  >
+                    <option value="webm" className="bg-[#121217]">
+                      WebM
+                    </option>
+                    <option value="mp4" className="bg-[#121217]">
+                      MP4 (H264)
+                    </option>
+                  </select>
+                </div>
+
+                <button
+                  onClick={handleExport}
+                  disabled={isRendering}
+                  className="flex items-center gap-2 px-4 py-2 rounded-lg font-medium text-sm transition-all bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white shadow-lg shadow-blue-500/20"
+                >
+                  <Download className="w-4 h-4" /> Export
+                </button>
+              </div>
+            </header>
+
+            <div className="flex-1 flex overflow-hidden relative">
+              {/* Sidebar (Left) */}
+              <div className="w-16 flex flex-col items-center py-6 border-r border-neutral-800/80 bg-[#0c0c10]/95 backdrop-blur-md gap-6 z-40 justify-between">
+                <div className="flex flex-col items-center gap-6">
+                  {/* Library Toggle button */}
+                  <button
+                    onClick={() => setIsLibraryOpen(!isLibraryOpen)}
+                    className={`p-3 rounded-xl transition-all duration-200 ${isLibraryOpen ? "bg-blue-600/10 border border-blue-500/30 text-blue-400 shadow-md shadow-blue-500/5" : "bg-transparent text-neutral-500 hover:text-neutral-300 hover:bg-neutral-900 border border-transparent"}`}
+                    title="Media Assets Library"
+                  >
+                    <Folder className="w-5 h-5" />
+                  </button>
+
+                  <div className="w-10 h-px bg-neutral-800"></div>
+
+                  <div className="group relative">
+                    <label className="cursor-pointer p-3 rounded-xl hover:bg-neutral-900 block text-blue-400 border border-transparent hover:border-neutral-800 transition-all">
+                      <Video className="w-5 h-5" />
+                      <input
+                        type="file"
+                        className="hidden"
+                        accept="video/mp4,video/webm"
+                        onChange={(e) => handleFileImport(e, "video")}
+                      />
+                    </label>
+                    <span className="absolute left-full ml-3 top-1/2 -translate-y-1/2 bg-black/90 border border-neutral-800 px-3 py-2 text-xs rounded-xl opacity-0 group-hover:opacity-100 pointer-events-none z-50 flex flex-col w-56 shadow-2xl backdrop-blur-sm transition-all duration-200">
+                      <span className="font-semibold text-white">Import Video</span>
+                      <span className="text-[10px] text-neutral-500 mt-1">Import MP4 (H264/AAC) or WebM files into the library.</span>
+                    </span>
+                  </div>
+
+                  <div className="group relative">
+                    <label className="cursor-pointer p-3 rounded-xl hover:bg-neutral-900 block text-emerald-400 border border-transparent hover:border-neutral-800 transition-all">
+                      <ImageIcon className="w-5 h-5" />
+                      <input
+                        type="file"
+                        className="hidden"
+                        accept="image/png,image/jpeg,image/webp"
+                        onChange={(e) => handleFileImport(e, "image")}
+                      />
+                    </label>
+                    <span className="absolute left-full ml-3 top-1/2 -translate-y-1/2 bg-black/90 border border-neutral-800 px-3 py-2 text-xs rounded-xl opacity-0 group-hover:opacity-100 pointer-events-none z-50 flex flex-col w-56 shadow-2xl backdrop-blur-sm transition-all duration-200">
+                      <span className="font-semibold text-white">Import Image</span>
+                      <span className="text-[10px] text-neutral-500 mt-1">Import PNG, JPG, or WebP files as assets.</span>
+                    </span>
+                  </div>
+
+                  <div className="group relative">
+                    <label className="cursor-pointer p-3 rounded-xl hover:bg-neutral-900 block text-purple-400 border border-transparent hover:border-neutral-800 transition-all">
+                      <Music className="w-5 h-5" />
+                      <input
+                        type="file"
+                        className="hidden"
+                        accept="audio/*,.mp3,.wav"
+                        onChange={(e) => handleFileImport(e, "audio")}
+                      />
+                    </label>
+                    <span className="absolute left-full ml-3 top-1/2 -translate-y-1/2 bg-black/90 border border-neutral-800 px-3 py-2 text-xs rounded-xl opacity-0 group-hover:opacity-100 pointer-events-none z-50 flex flex-col w-56 shadow-2xl backdrop-blur-sm transition-all duration-200">
+                      <span className="font-semibold text-white">Import Audio</span>
+                      <span className="text-[10px] text-neutral-500 mt-1">Import MP3 or WAV files into audio tracks.</span>
+                    </span>
+                  </div>
+
+                  <div className="group relative">
+                    <button
+                      onClick={() => {
+                        const id = generateId();
+                        const newClip = {
+                          id,
+                          type: "text",
+                          text: "New Text Layer",
+                          color: "#ffffff",
+                          fontSize: 80,
+                          x: 50,
+                          y: 50,
+                          fontFamily: "Arial",
+                          start: stateRef.current.currentTime,
+                          duration: 5,
+                          offset: 0,
+                          fadeInDuration: 0,
+                          fadeOutDuration: 0,
+                          name: "Text Title",
+                        };
+                        const newTracks = {
+                          ...stateRef.current.tracks,
+                          text1: [...stateRef.current.tracks.text1, newClip],
+                        };
+                        pushHistory(newTracks);
+                        setSelectedClip({ ...newClip, trackId: "text1" });
+                      }}
+                      className="cursor-pointer p-3 rounded-xl hover:bg-neutral-900 block text-amber-400 border border-transparent hover:border-neutral-800 transition-all"
+                    >
+                      <span className="font-bold text-lg block leading-none">T</span>
+                    </button>
+                    <span className="absolute left-full ml-3 top-1/2 -translate-y-1/2 bg-black/90 border border-neutral-800 px-3 py-2 text-xs rounded-xl opacity-0 group-hover:opacity-100 pointer-events-none z-50 flex flex-col w-56 shadow-2xl backdrop-blur-sm transition-all duration-200">
+                      <span className="font-semibold text-white">Create Text Title</span>
+                      <span className="text-[10px] text-neutral-500 mt-1">Insert a styleable text subtitle overlay.</span>
+                    </span>
+                  </div>
+                </div>
+
+                {/* Logo or Settings Footer */}
+                <div className="flex flex-col items-center gap-4 text-neutral-600">
+                  <span className="text-[9px] font-bold select-none tracking-widest text-neutral-700 hover:text-neutral-500 transition-colors">V1.5</span>
+                </div>
+              </div>
+
+              {/* Collapsible Media Library Panel */}
+              {isLibraryOpen && (
+                <div className="w-64 border-r border-neutral-800/80 bg-[#0c0c10]/95 backdrop-blur-md flex flex-col z-35 transition-all duration-300">
+                  <div className="p-4 border-b border-neutral-850 flex items-center justify-between">
+                    <span className="font-bold text-sm text-white flex items-center gap-2">
+                      <Folder className="w-4 h-4 text-blue-500" /> Media Library
+                    </span>
+                    <button
+                      onClick={() => setIsLibraryOpen(false)}
+                      className="text-neutral-400 hover:text-white p-1 rounded hover:bg-neutral-800"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+
+                  <div className="p-3 border-b border-neutral-850 bg-neutral-900/40">
+                    <label className="cursor-pointer py-2 px-3 text-center border border-dashed border-neutral-700 hover:border-blue-500 rounded-lg text-xs font-medium text-neutral-400 hover:text-white block transition-all">
+                      <span>+ Import Local Files</span>
+                      <input
+                        type="file"
+                        className="hidden"
+                        accept="video/*,audio/*,image/*"
+                        onChange={(e) => {
+                          const file = e.target.files[0];
+                          if (!file) return;
+                          const t = file.type.split("/")[0];
+                          const type = t === "audio" ? "audio" : t === "image" ? "image" : "video";
+                          handleFileImport(e, type);
+                        }}
+                      />
+                    </label>
+                  </div>
+
+                  <div className="flex-1 overflow-y-auto p-3 space-y-2 select-none">
+                    {assets.length === 0 ? (
+                      <div className="h-48 flex flex-col items-center justify-center text-center p-4">
+                        <Folder className="w-8 h-8 text-neutral-700 mb-2" />
+                        <span className="text-xs text-neutral-500">Library is empty</span>
+                        <span className="text-[10px] text-neutral-600 mt-1 max-w-[150px] leading-relaxed">Import videos, audio, or images to get started.</span>
+                      </div>
+                    ) : (
+                      assets.map((asset) => (
+                        <div
+                          key={asset.id}
+                          className="bg-neutral-900/50 border border-neutral-800 hover:border-neutral-700 rounded-lg p-2.5 flex items-center justify-between gap-3 group/item transition-all"
+                        >
+                          <div className="flex items-center gap-2.5 min-w-0 flex-1">
+                            <div className="w-8 h-8 rounded bg-neutral-800 flex items-center justify-center flex-shrink-0">
+                              {asset.type === "video" ? (
+                                <Video className="w-4 h-4 text-blue-400" />
+                              ) : asset.type === "audio" ? (
+                                <Music className="w-4 h-4 text-purple-400" />
+                              ) : (
+                                <ImageIcon className="w-4 h-4 text-emerald-400" />
+                              )}
+                            </div>
+                            <div className="flex flex-col min-w-0">
+                              <span className="text-xs font-medium text-neutral-200 truncate" title={asset.name}>
+                                {asset.name}
+                              </span>
+                              <span className="text-[9px] text-neutral-500 font-mono mt-0.5">
+                                {asset.type.toUpperCase()} {asset.duration ? `• ${asset.duration.toFixed(1)}s` : ""}
+                              </span>
+                            </div>
+                          </div>
+                          
+                          <div className="flex items-center gap-1 opacity-60 group-hover/item:opacity-100 transition-opacity">
+                            <button
+                              onClick={() => insertAsset(asset)}
+                              className="p-1 hover:bg-neutral-800 rounded text-neutral-400 hover:text-white"
+                              title="Insert at Playhead"
+                            >
+                              <Plus className="w-3.5 h-3.5" />
+                            </button>
+                            <button
+                              onClick={() => deleteAsset(asset.id)}
+                              className="p-1 hover:bg-red-950/40 rounded text-neutral-500 hover:text-red-400"
+                              title="Remove Asset"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {/* Main Workspace Area (Center) */}
+              <div className="flex-1 flex flex-col bg-[#0f0f13] min-w-0 relative">
+                {/* Preview Panel */}
+                <div
+                  className="flex-1 flex items-center justify-center p-8 bg-[#040406] relative overflow-hidden min-h-0"
+                  ref={previewContainerRef}
+                >
+                  {/* Master Level & Volume Panel (Left Side of Preview) */}
+                  <div className="absolute left-6 top-1/2 -translate-y-1/2 flex flex-col items-center gap-3.5 z-20 bg-[#121217]/80 p-4 rounded-2xl border border-white/5 backdrop-blur-md shadow-2xl">
+                    <div className="flex flex-row gap-5 h-60">
+                      {/* Master Volume Slider */}
+                      <div
+                        className="w-2.5 bg-neutral-800 rounded-full relative cursor-pointer group shadow-inner"
+                        onMouseDown={(e) => {
+                          const rect = e.currentTarget.getBoundingClientRect();
+                          const updateVol = (clientY) => {
+                            const y = Math.max(
+                              0,
+                              Math.min(rect.height, clientY - rect.top),
+                            );
+                            const vol = 1 - y / rect.height;
+                            setMasterVolume(Math.max(0, Math.min(1, vol)));
+                          };
+                          updateVol(e.clientY);
+
+                          const moveHandler = (moveEvent) => {
+                            moveEvent.preventDefault();
+                            updateVol(moveEvent.clientY);
+                          };
+                          const upHandler = () => {
+                            window.removeEventListener(
+                              "mousemove",
+                              moveHandler,
+                            );
+                            window.removeEventListener("mouseup", upHandler);
+                          };
+                          window.addEventListener("mousemove", moveHandler);
+                          window.addEventListener("mouseup", upHandler);
+                        }}
+                      >
+                        <div
+                          className="absolute bottom-0 w-full bg-gradient-to-t from-blue-600 to-blue-400 rounded-full transition-colors"
+                          style={{ height: `${masterVolume * 100}%` }}
+                        ></div>
+                        <div
+                          className="absolute left-1/2 -translate-x-1/2 w-4.5 h-4.5 bg-white rounded-full shadow-md border border-neutral-300 transform transition-transform group-hover:scale-110"
+                          style={{
+                            bottom: `calc(${masterVolume * 100}% - 9px)`,
+                          }}
+                        ></div>
+                      </div>
+
+                      {/* VU Meter Canvas */}
+                      <div className="w-5 bg-neutral-900 rounded-lg overflow-hidden relative shadow-inner flex items-center justify-center p-0.5 border border-neutral-800">
+                        <canvas
+                          ref={meterCanvasRef}
+                          width={20}
+                          height={240}
+                          className="w-full h-full opacity-95 rounded-sm"
+                        />
+                      </div>
+                    </div>
+                    <div className="flex flex-col items-center gap-1 font-sans">
+                      <Volume2 className="w-4 h-4 text-neutral-400" />
+                      <span className="text-[9px] font-mono text-neutral-500">{(masterVolume * 100).toFixed(0)}%</span>
+                    </div>
+                  </div>
+
+                  {/* HTML5 Canvas Preview Monitor */}
+                  <canvas
+                    ref={canvasRef}
+                    width={CONFIG.width}
+                    height={CONFIG.height}
+                    className="shadow-2xl bg-black border border-white/5 max-w-full max-h-full object-contain aspect-video rounded-lg"
+                  />
+
+                  {/* Floating Controller bar (Glassmorphic Bottom Overlay) */}
+                  <div className="absolute bottom-6 left-1/2 -translate-x-1/2 bg-[#121217]/90 border border-neutral-800/80 px-6 py-3 rounded-2xl flex items-center gap-6 shadow-2xl backdrop-blur-md z-20 transition-all select-none">
+                    <button
+                      onClick={() =>
+                        setLocators((p) => ({ ...p, left: currentTime }))
+                      }
+                      className="text-[10px] font-bold text-neutral-400 hover:text-blue-400 flex flex-col items-center gap-1 transition-colors font-sans"
+                      title="Set Mark In"
+                    >
+                      <Anchor className="w-3.5 h-3.5" />
+                      [ IN ]
+                    </button>
+
+                    <div className="flex items-center gap-2 bg-neutral-900/80 rounded-xl p-1 border border-neutral-800">
+                      <button
+                        onClick={() => updateTime(Math.max(0, currentTime - 5))}
+                        aria-label="Rewind 5s"
+                        className="p-2 hover:text-white text-neutral-400 hover:bg-neutral-800 rounded-lg transition-colors animate-colors"
+                        title="Rewind 5s"
+                      >
+                        <Rewind className="w-4 h-4" />
+                      </button>
+                      <button
+                        onClick={() => {
+                          if (isPlaying) {
+                            togglePlay();
+                          }
+                          updateTime(locators.left);
+                        }}
+                        aria-label="Stop playback"
+                        className="p-2 hover:text-white text-neutral-400 hover:bg-neutral-800 rounded-lg transition-colors animate-colors"
+                        title="Stop to In Point"
+                      >
+                        <Square className="w-4 h-4 fill-current" />
+                      </button>
+                      <button
+                        onClick={togglePlay}
+                        aria-label={isPlaying ? "Pause" : "Play"}
+                        className={`p-2.5 rounded-xl text-white shadow-lg ${isPlaying ? "bg-amber-600 shadow-amber-600/20 hover:bg-amber-500" : "bg-blue-600 shadow-blue-600/20 hover:bg-blue-500"} transition-all`}
+                        title="Play / Pause (Space)"
+                      >
+                        {isPlaying ? (
+                          <Pause className="w-5 h-5 fill-current" />
+                        ) : (
+                          <Play className="w-5 h-5 fill-current ml-0.5" />
+                        )}
+                      </button>
+                      <button
+                        onClick={() => updateTime(currentTime + 5)}
+                        aria-label="Forward 5s"
+                        className="p-2 hover:text-white text-neutral-400 hover:bg-neutral-800 rounded-lg transition-colors animate-colors"
+                        title="Forward 5s"
+                      >
+                        <FastForward className="w-4 h-4" />
+                      </button>
+                    </div>
+
+                    <button
+                      onClick={() =>
+                        setLocators((p) => ({ ...p, right: currentTime }))
+                      }
+                      className="text-[10px] font-bold text-neutral-400 hover:text-blue-400 flex flex-col items-center gap-1 transition-colors font-sans"
+                      title="Set Mark Out"
+                    >
+                      <Anchor className="w-3.5 h-3.5" />
+                      [ OUT ]
+                    </button>
+
+                    <div className="w-px h-8 bg-neutral-800"></div>
+
+                    <button
+                      onClick={() => setIsLooping(!isLooping)}
+                      className={`p-2 rounded-xl transition-all ${isLooping ? "text-blue-400 bg-blue-900/30 border border-blue-500/20" : "text-neutral-500 hover:text-neutral-300 hover:bg-neutral-900 border border-transparent"}`}
+                      title="Toggle Loop Playback"
+                    >
+                      <Repeat className="w-4 h-4" />
+                    </button>
+
+                    <div className="w-px h-8 bg-neutral-800"></div>
+                    
+                    <div className="font-mono text-xl text-blue-400 font-bold tracking-tight w-28 text-center select-all">
+                      {formatTime(currentTime)}
+                    </div>
+                  </div>
+                </div>
+
+                {/* Sub-preview Editing Toolbar */}
+                <div className="h-12 border-t border-b border-neutral-800/80 bg-[#0c0c10]/95 backdrop-blur-md flex items-center px-4 justify-between z-20 relative flex-shrink-0">
+                  <div className="flex items-center gap-1.5 flex-wrap">
+                    <button
+                      onClick={cutClip}
+                      disabled={!selectedClip}
+                      className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg hover:bg-neutral-900 text-xs font-semibold text-neutral-300 disabled:opacity-30 disabled:cursor-not-allowed transition-all font-sans"
+                      title="Split Clip at Playhead"
+                    >
+                      <Scissors className="w-3.5 h-3.5 text-blue-400" /> Split
+                    </button>
+                    <button
+                      onClick={copyClip}
+                      disabled={!selectedClip}
+                      className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg hover:bg-neutral-900 text-xs font-semibold text-neutral-300 disabled:opacity-30 disabled:cursor-not-allowed transition-all font-sans"
+                      title="Copy Clip (Cmd+C)"
+                    >
+                      <Copy className="w-3.5 h-3.5 text-blue-400" /> Copy
+                    </button>
+                    <button
+                      onClick={pasteClip}
+                      disabled={!clipboard}
+                      className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg hover:bg-neutral-900 text-xs font-semibold text-neutral-300 disabled:opacity-30 disabled:cursor-not-allowed transition-all font-sans"
+                      title="Paste Clip (Cmd+V)"
+                    >
+                      <Clipboard className="w-3.5 h-3.5 text-blue-400" /> Paste
+                    </button>
+                    <button
+                      onClick={deleteSelected}
+                      disabled={!selectedClip}
+                      className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg hover:bg-red-950/30 text-xs font-semibold text-neutral-300 hover:text-red-400 disabled:opacity-30 disabled:cursor-not-allowed transition-all font-sans"
+                      title="Delete Clip (Backspace)"
+                    >
+                      <Trash2 className="w-3.5 h-3.5 text-red-500" /> Delete
+                    </button>
+
+                    {selectedClip && selectedClip.type === "video" && (
+                      <button
+                        onClick={detachAudio}
+                        className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg hover:bg-purple-900/30 text-xs font-semibold text-neutral-300 hover:text-purple-400 transition-all ml-1.5 font-sans"
+                        title="Detach audio stream into a separate track"
+                      >
+                        <VolumeX className="w-3.5 h-3.5 text-purple-400" /> Detach Audio
+                      </button>
+                    )}
+                  </div>
+                  
+                  <div className="flex items-center gap-4 flex-shrink-0">
+                    {/* Snap Toggle button */}
+                    <button
+                      onClick={() => setSnapping(!snapping)}
+                      className={`p-2 rounded-lg border transition-all ${snapping ? "bg-blue-600/10 border-blue-500/30 text-blue-400" : "bg-neutral-900 border-neutral-800 text-neutral-500 hover:text-neutral-300"}`}
+                      title="Toggle Clip Snapping"
+                    >
+                      <Magnet className="w-3.5 h-3.5" />
+                    </button>
+                    
+                    {/* Timeline Zoom Slider */}
+                    <div className="flex items-center gap-2">
+                      <ZoomOut className="w-3.5 h-3.5 text-neutral-500" />
+                      <input
+                        type="range"
+                        min="1"
+                        max="200"
+                        value={zoomLevel}
+                        onChange={(e) => setZoomLevel(Number(e.target.value))}
+                        className="w-24 h-1 bg-neutral-850 rounded-lg appearance-none cursor-pointer accent-blue-500"
+                      />
+                      <ZoomIn className="w-3.5 h-3.5 text-neutral-500" />
+                      <span className="text-[10px] text-neutral-500 font-mono w-12 text-right">{zoomLevel.toFixed(0)} px/s</span>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Timeline Panel */}
+                <div
+                  className="h-72 bg-[#08080a] relative select-none flex-shrink-0"
+                  ref={timelineContainerRef}
+                  style={{ overflow: "auto" }}
+                >
+                  <div
+                    style={{
+                      width: `${timelineContentWidth}px`,
+                      height: `${trackStackHeight + 32}px`,
+                      position: "relative",
+                    }}
+                  >
+                    {/* Time ruler - sticky to top of scroll container */}
+                    <div
+                      className="h-8 bg-[#0c0c10]/95 border-b border-neutral-850 sticky top-0 z-20 flex backdrop-blur-sm"
+                      style={{ width: `${timelineContentWidth}px` }}
+                    >
+                      <div className="w-[100px] border-r border-neutral-850 bg-[#0c0c10] flex-shrink-0 sticky left-0 z-30 shadow-[4px_0_8px_rgba(0,0,0,0.4)]"></div>
+                      <div
+                        className="flex-1 relative cursor-pointer group"
+                        onMouseDown={(e) => {
+                          if (e.target === e.currentTarget) {
+                            const rect =
+                              e.currentTarget.getBoundingClientRect();
+                            updateTime(
+                              getSnappedTime(
+                                Math.max(
+                                  0,
+                                  (e.clientX - rect.left) / zoomLevel,
+                                ),
+                              ),
+                            );
+                          }
+                        }}
+                      >
+                        {/* Time Ruler Locator bar area */}
+                        <div
+                          className="absolute top-0 bottom-0 w-0.5 bg-blue-500 z-30 cursor-ew-resize hover:bg-blue-400"
+                          style={{ left: `${locators.left * zoomLevel}px` }}
+                          onMouseDown={(e) => handleLocatorMouseDown(e, "left")}
+                        >
+                          <div className="text-[9px] font-bold bg-blue-600 text-white px-1.5 py-0.5 absolute -top-0 rounded-r shadow-md font-mono select-none">
+                            IN
+                          </div>
+                        </div>
+                        <div
+                          className="absolute top-0 bottom-0 w-0.5 bg-blue-500 z-30 cursor-ew-resize hover:bg-blue-400"
+                          style={{ left: `${locators.right * zoomLevel}px` }}
+                          onMouseDown={(e) =>
+                            handleLocatorMouseDown(e, "right")
+                          }
+                        >
+                          <div className="text-[9px] font-bold bg-blue-600 text-white px-1.5 py-0.5 absolute -top-0 rounded-l -ml-5.5 shadow-md font-mono select-none">
+                            OUT
+                          </div>
+                        </div>
+                        <div
+                          className="absolute top-0 h-full bg-blue-500/5 pointer-events-none border-l border-r border-blue-500/10"
+                          style={{
+                            left: `${locators.left * zoomLevel}px`,
+                            width: `${(locators.right - locators.left) * zoomLevel}px`,
+                          }}
+                        ></div>
+
+                        {/* Ruler ticks */}
+                        {Array.from({ length: Math.ceil(duration) }).map(
+                          (_, i) => (
+                            <div
+                              key={i}
+                              className="absolute top-4 h-2 w-px bg-neutral-800"
+                              style={{ left: `${i * zoomLevel}px` }}
+                            >
+                              <span className="text-[9px] text-neutral-600 -ml-2 -mt-4 absolute select-none font-mono">
+                                {i}s
+                              </span>
+                            </div>
+                          ),
+                        )}
+
+                        {/* Markers pin */}
+                        {markers.map((m) => (
+                          <div
+                            key={m.id}
+                            className="absolute top-0 bottom-0 w-px bg-amber-400/30 z-20 pointer-events-none"
+                            style={{ left: `${m.time * zoomLevel}px` }}
+                          >
+                            <div className="absolute -top-1 -ml-1.5 text-amber-500 filter drop-shadow">
+                              <MapPin className="w-3.5 h-3.5 fill-current" />
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+
+                    {/* Tracks Region */}
+                    <div
+                      ref={tracksContainerRef}
+                      style={{
+                        width: `${timelineContentWidth}px`,
+                        height: `${trackStackHeight}px`,
+                      }}
+                    >
+                      {TRACK_ORDER.map((trackId) => (
+                        <div
+                          key={trackId}
+                          className="flex relative border-b border-neutral-900 hover:bg-neutral-900/10 transition-colors"
+                          style={{ height: CONFIG.trackHeight }}
+                        >
+                          {/* Left sticky track title header */}
+                          <div className="w-[100px] flex-shrink-0 border-r border-neutral-850 bg-[#0c0c10] flex flex-col justify-center px-3.5 z-35 sticky left-0 shadow-[4px_0_8px_rgba(0,0,0,0.4)] select-none">
+                            <span className="text-[10px] font-bold text-neutral-400 uppercase tracking-widest leading-none font-sans">
+                              {trackId}
+                            </span>
+                            <div className="flex items-center gap-2 mt-2">
+                              {trackId.includes("text") ? (
+                                <Keyboard className="w-3.5 h-3.5 text-neutral-600" />
+                              ) : trackId.includes("video") ? (
+                                <Video className="w-3.5 h-3.5 text-neutral-600" />
+                              ) : (
+                                <Volume2 className="w-3.5 h-3.5 text-neutral-600" />
+                              )}
+                            </div>
+                          </div>
+                          
+                          {/* Track area where clips live */}
+                          <div
+                            className="flex-1 relative h-full"
+                            onClick={(e) => {
+                              if (e.target === e.currentTarget) {
+                                const rect =
+                                  e.currentTarget.getBoundingClientRect();
+                                updateTime(
+                                  getSnappedTime(
+                                    (e.clientX - rect.left) / zoomLevel,
+                                  ),
+                                );
+                                setSelectedClip(null);
+                              }
+                            }}
+                          >
+                            {tracks[trackId].map((clip) => (
+                              <div
+                                key={clip.id}
+                                onMouseDown={(e) =>
+                                  handleClipMouseDown(e, clip, trackId)
+                                }
+                                className={`absolute top-2 bottom-2 rounded-lg overflow-hidden border cursor-pointer group transition-all duration-150 select-none ${selectedClip?.id === clip.id ? "border-yellow-400 ring-2 ring-yellow-400/40 z-10 shadow-[0_0_12px_rgba(234,179,8,0.25)]" : "border-neutral-800 hover:border-neutral-700 hover:shadow-lg"} ${clip.type === "text" ? "bg-gradient-to-r from-amber-650/40 to-amber-900/40 hover:from-amber-600/40" : clip.type === "audio" ? "bg-gradient-to-r from-purple-950/40 to-indigo-950/40 hover:from-purple-900/40" : "bg-gradient-to-r from-blue-950/40 to-sky-950/40 hover:from-blue-900/40"} ${clip.muted ? "saturate-0 opacity-40" : ""}`}
+                                style={{
+                                  left: `${clip.start * zoomLevel}px`,
+                                  width: `${clip.duration * zoomLevel}px`,
+                                }}
+                              >
+                                {clip.waveform && (
+                                  <div className="absolute inset-0 flex items-center justify-around opacity-30 pointer-events-none select-none">
+                                    {clip.waveform.map((val, idx) => (
+                                      <div
+                                        key={idx}
+                                        className="w-0.5 bg-purple-300"
+                                        style={{ height: `${val * 85}%` }}
+                                      ></div>
+                                    ))}
+                                  </div>
+                                )}
+                                <div className="px-2.5 py-1.5 text-[10px] truncate text-white font-medium flex items-center gap-1.5 bg-black/30 relative z-10 select-none font-sans">
+                                  {clip.muted && <VolumeX className="w-3 h-3 text-red-400 flex-shrink-0" />}
+                                  {clip.name}
+                                </div>
+                                {clip.fadeInDuration > 0 && (
+                                  <div
+                                    className="absolute top-0 bottom-0 left-0 bg-gradient-to-r from-white/15 to-transparent pointer-events-none z-10"
+                                    style={{
+                                      width: `${clip.fadeInDuration * zoomLevel}px`,
+                                    }}
+                                  >
+                                    <div className="absolute top-0 bottom-0 right-0 w-px bg-white/20"></div>
+                                  </div>
+                                )}
+                                {clip.fadeOutDuration > 0 && (
+                                  <div
+                                    className="absolute top-0 bottom-0 right-0 bg-gradient-to-l from-white/15 to-transparent pointer-events-none z-10"
+                                    style={{
+                                      width: `${clip.fadeOutDuration * zoomLevel}px`,
+                                    }}
+                                  >
+                                    <div className="absolute top-0 bottom-0 left-0 w-px bg-white/20"></div>
+                                  </div>
+                                )}
+                                
+                                {/* Trim Handles L/R */}
+                                <div
+                                  className="absolute left-0 top-0 bottom-0 w-3.5 hover:bg-yellow-400/40 cursor-ew-resize z-20 flex items-center justify-center group/handle border-r border-white/5"
+                                  onMouseDown={(e) =>
+                                    handleTrimMouseDown(
+                                      e,
+                                      clip,
+                                      trackId,
+                                      "left",
+                                    )
+                                  }
+                                >
+                                  <div className="w-0.5 h-3 bg-white/40 rounded-full group-hover/handle:bg-white"></div>
+                                </div>
+                                <div
+                                  className="absolute right-0 top-0 bottom-0 w-3.5 hover:bg-yellow-400/40 cursor-ew-resize z-20 flex items-center justify-center group/handle border-l border-white/5"
+                                  onMouseDown={(e) =>
+                                    handleTrimMouseDown(
+                                      e,
+                                      clip,
+                                      trackId,
+                                      "right",
+                                    )
+                                  }
+                                >
+                                  <div className="w-0.5 h-3 bg-white/40 rounded-full group-hover/handle:bg-white"></div>
+                                </div>
+                              </div>
+                            ))}
+                            <div
+                              className="absolute top-0 bottom-0 w-px bg-red-500/20 pointer-events-none z-0"
+                              style={{ left: `${currentTime * zoomLevel}px` }}
+                            ></div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+
+                    {/* Snap Guide Line Overlay */}
+                    {activeSnapTime !== null && (
+                      <div
+                        className="absolute top-0 bottom-0 w-px bg-yellow-400/80 z-25 pointer-events-none shadow-[0_0_8px_#facc15]"
+                        style={{
+                          left: `${100 + activeSnapTime * zoomLevel}px`,
+                          height: `${trackStackHeight + 32}px`,
+                        }}
+                      ></div>
+                    )}
+
+                    {/* Timeline Playhead needle line */}
+                    <div
+                      className="absolute top-0 bottom-0 w-px bg-red-500 z-25 pointer-events-none shadow-[0_0_4px_#ef4444]"
+                      style={{
+                        left: `${100 + currentTime * zoomLevel}px`,
+                        height: `${trackStackHeight + 32}px`,
+                      }}
+                    >
+                      {/* Playhead diamond head */}
+                      <div className="w-4.5 h-4.5 bg-red-500 absolute -top-1.5 -ml-2.25 rounded rotate-45 shadow-[0_1px_3px_rgba(0,0,0,0.5)] border border-red-400"></div>
+                      <div className="w-2 h-2 bg-white absolute top-0 -ml-1 rounded rotate-45"></div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Collapsible Inspector Panel (Right Side) */}
+              {isInspectorOpen && selectedClip && (
+                <div className="w-80 border-l border-neutral-850 bg-[#0c0c10]/95 backdrop-blur-md flex flex-col z-35 transition-all duration-300">
+                  <div className="h-14 border-b border-neutral-850 flex items-center justify-between px-4 bg-[#0c0c10] flex-shrink-0 select-none">
+                    <span className="font-bold text-xs tracking-widest text-neutral-400 uppercase">
+                      Inspector
+                    </span>
+                    <button
+                      onClick={() => setSelectedClip(null)}
+                      className="text-neutral-400 hover:text-white p-1 rounded hover:bg-neutral-800"
+                    >
+                      <X className="w-4 h-4" />
+                    </button>
+                  </div>
+
+                  <div className="flex-1 overflow-y-auto p-5 space-y-6 text-sm text-neutral-300 select-none font-sans">
+                    
+                    {/* General Section */}
+                    <div className="space-y-3">
+                      <div className="flex items-center gap-2 pb-1 border-b border-neutral-850">
+                        <span className="font-semibold text-white text-xs uppercase tracking-wide">General Info</span>
+                      </div>
+                      <div className="flex flex-col gap-1.5">
+                        <span className="text-[10px] text-neutral-500 font-medium">Clip Name</span>
+                        <input
+                          type="text"
+                          value={selectedClip.name}
+                          onChange={(e) => {
+                            const newTracks = {
+                              ...stateRef.current.tracks,
+                              [selectedClip.trackId]: stateRef.current.tracks[selectedClip.trackId].map((c) =>
+                                c.id === selectedClip.id ? { ...c, name: e.target.value } : c
+                              ),
+                            };
+                            pushHistory(newTracks);
+                            setSelectedClip((prev) => ({ ...prev, name: e.target.value }));
+                          }}
+                          className="bg-neutral-900 text-white rounded-lg px-3 py-2 outline-none border border-neutral-800 focus:border-blue-500 transition-all text-xs"
+                        />
+                      </div>
+
+                      <div className="grid grid-cols-2 gap-3.5 mt-2 font-sans">
+                        <div className="flex flex-col gap-1">
+                          <span className="text-[10px] text-neutral-500 font-medium">Start Time</span>
+                          <span className="font-mono text-xs text-neutral-400 bg-neutral-900/60 p-2 rounded-lg border border-neutral-850">{selectedClip.start.toFixed(2)}s</span>
+                        </div>
+                        <div className="flex flex-col gap-1">
+                          <span className="text-[10px] text-neutral-500 font-medium">Duration</span>
+                          <span className="font-mono text-xs text-neutral-400 bg-neutral-900/60 p-2 rounded-lg border border-neutral-850">{selectedClip.duration.toFixed(2)}s</span>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Text Title Properties Editor */}
+                    {selectedClip.type === "text" && (
+                      <div className="space-y-4 pt-4 border-t border-neutral-900">
+                        <div className="flex items-center gap-2 pb-1 border-b border-neutral-850">
+                          <span className="font-semibold text-white text-xs uppercase tracking-wide">Text Settings</span>
+                        </div>
+                        <div className="flex flex-col gap-1.5">
+                          <span className="text-[10px] text-neutral-500 font-medium">Display Value</span>
+                          <textarea
+                            value={selectedClip.text}
+                            onChange={(e) => updateTextProp("text", e.target.value)}
+                            rows={3}
+                            className="bg-neutral-900 text-white rounded-lg px-3 py-2 outline-none border border-neutral-800 focus:border-blue-500 transition-all text-xs resize-none"
+                          />
+                        </div>
+
+                        <div className="flex flex-col gap-1.5">
+                          <span className="text-[10px] text-neutral-500 font-medium">Font Family</span>
+                          <select
+                            value={selectedClip.fontFamily || "Arial"}
+                            onChange={(e) => updateTextProp("fontFamily", e.target.value)}
+                            className="bg-neutral-900 text-white rounded-lg px-2.5 py-2 outline-none border border-neutral-800 cursor-pointer text-xs"
+                          >
+                            <option value="Arial">Arial</option>
+                            <option value="Helvetica">Helvetica</option>
+                            <option value="Outfit">Outfit</option>
+                            <option value="JetBrains Mono">JetBrains Mono</option>
+                            <option value="Georgia">Georgia</option>
+                            <option value="Impact">Impact</option>
+                            <option value="Times New Roman">Times New Roman</option>
+                          </select>
+                        </div>
+
+                        <div className="grid grid-cols-2 gap-4">
+                          <div className="flex flex-col gap-1.5">
+                            <span className="text-[10px] text-neutral-500 font-medium">Text Color</span>
+                            <div className="flex items-center gap-2">
+                              <input
+                                type="color"
+                                value={selectedClip.color || "#ffffff"}
+                                onChange={(e) => updateTextProp("color", e.target.value)}
+                                className="w-9 h-9 rounded-md bg-transparent border-none cursor-pointer"
+                              />
+                              <span className="text-xs font-mono font-medium text-neutral-400">{selectedClip.color}</span>
+                            </div>
+                          </div>
+
+                          <div className="flex flex-col gap-1.5">
+                            <span className="text-[10px] text-neutral-500 font-medium">Font Size</span>
+                            <input
+                              type="number"
+                              value={selectedClip.fontSize || 80}
+                              onChange={(e) => updateTextProp("fontSize", Number(e.target.value))}
+                              className="bg-neutral-900 text-white rounded-lg px-3 py-2 outline-none border border-neutral-800 text-xs w-full"
+                              min="10"
+                              max="400"
+                            />
+                          </div>
+                        </div>
+
+                        <div className="grid grid-cols-2 gap-4">
+                          <div className="flex flex-col gap-1.5">
+                            <span className="text-[10px] text-neutral-500 font-medium">Position X (%)</span>
+                            <input
+                              type="number"
+                              value={selectedClip.x !== undefined ? selectedClip.x : 50}
+                              onChange={(e) => updateTextProp("x", Number(e.target.value))}
+                              className="bg-neutral-900 text-white rounded-lg px-3 py-2 outline-none border border-neutral-800 text-xs w-full font-mono"
+                              min="0"
+                              max="100"
+                            />
+                          </div>
+                          <div className="flex flex-col gap-1.5">
+                            <span className="text-[10px] text-neutral-500 font-medium">Position Y (%)</span>
+                            <input
+                              type="number"
+                              value={selectedClip.y !== undefined ? selectedClip.y : 50}
+                              onChange={(e) => updateTextProp("y", Number(e.target.value))}
+                              className="bg-neutral-900 text-white rounded-lg px-3 py-2 outline-none border border-neutral-800 text-xs w-full font-mono"
+                              min="0"
+                              max="100"
+                            />
+                          </div>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Audio Controls Section */}
+                    {(selectedClip.type === "video" || selectedClip.type === "audio") && (
+                      <div className="space-y-4 pt-4 border-t border-neutral-900">
+                        <div className="flex items-center gap-2 pb-1 border-b border-neutral-850">
+                          <span className="font-semibold text-white text-xs uppercase tracking-wide">Audio Controls</span>
+                        </div>
+                        
+                        <div className="flex items-center justify-between bg-neutral-900/30 p-2.5 rounded-xl border border-neutral-850">
+                          <span className="text-xs text-neutral-450 flex items-center gap-2 font-sans font-medium">
+                            {selectedClip.muted ? <VolumeX className="w-4 h-4 text-red-500" /> : <Volume2 className="w-4 h-4 text-blue-500" />}
+                            Mute Clip Audio
+                          </span>
+                          <button
+                            onClick={toggleMuteClip}
+                            className={`w-9 h-5 rounded-full p-0.5 transition-colors duration-200 ${selectedClip.muted ? "bg-red-600 flex justify-end" : "bg-neutral-700 flex justify-start"}`}
+                          >
+                            <div className="w-4 h-4 bg-white rounded-full shadow"></div>
+                          </button>
+                        </div>
+
+                        {!selectedClip.muted && (
+                          <div className="flex flex-col gap-2">
+                            <div className="flex justify-between text-[10px] text-neutral-505 font-medium font-sans">
+                              <span>Volume</span>
+                              <span className="font-mono text-neutral-400">{((selectedClip.volume ?? 1) * 100).toFixed(0)}%</span>
+                            </div>
+                            <input
+                              type="range"
+                              min="0"
+                              max="1"
+                              step="0.05"
+                              value={selectedClip.volume ?? 1}
+                              onChange={(e) => updateClipVolume(e.target.value)}
+                              className="w-full h-1 bg-neutral-800 rounded-lg appearance-none cursor-pointer accent-blue-500"
+                            />
+                          </div>
+                        )}
+
+                        <div className="flex flex-col gap-1.5 font-sans">
+                          <span className="text-[10px] text-neutral-500 font-medium">Playback Speed</span>
+                          <select
+                            value={selectedClip.speed ?? 1}
+                            onChange={(e) => updateClipSpeed(e.target.value)}
+                            className="bg-neutral-900 text-white rounded-lg px-2.5 py-2 outline-none border border-neutral-800 cursor-pointer text-xs"
+                          >
+                            <option value="0.5">0.5x (Slow Mo)</option>
+                            <option value="0.75">0.75x</option>
+                            <option value="1">1.0x (Normal)</option>
+                            <option value="1.25">1.25x</option>
+                            <option value="1.5">1.5x</option>
+                            <option value="2">2.0x (Fast Mo)</option>
+                          </select>
+                        </div>
+
+                        {/* Audio Fades */}
+                        <div className="grid grid-cols-2 gap-4">
+                          <div className="flex flex-col gap-1.5 font-sans">
+                            <span className="text-[10px] text-neutral-500 font-medium">Fade In (s)</span>
+                            <input
+                              type="number"
+                              min="0"
+                              max={selectedClip.duration - (selectedClip.fadeOutDuration || 0)}
+                              step="0.1"
+                              value={selectedClip.fadeInDuration || 0}
+                              onChange={(e) => updateFadeProp("fadeInDuration", e.target.value)}
+                              className="bg-neutral-900 text-white rounded-lg px-3 py-2 outline-none border border-neutral-800 text-xs w-full font-mono"
+                            />
+                          </div>
+                          <div className="flex flex-col gap-1.5 font-sans">
+                            <span className="text-[10px] text-neutral-500 font-medium">Fade Out (s)</span>
+                            <input
+                              type="number"
+                              min="0"
+                              max={selectedClip.duration - (selectedClip.fadeInDuration || 0)}
+                              step="0.1"
+                              value={selectedClip.fadeOutDuration || 0}
+                              onChange={(e) => updateFadeProp("fadeOutDuration", e.target.value)}
+                              className="bg-neutral-900 text-white rounded-lg px-3 py-2 outline-none border border-neutral-800 text-xs w-full font-mono"
+                            />
+                          </div>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* CSS Adjustments / Visual Filters */}
+                    {(selectedClip.type === "video" || selectedClip.type === "image") && (
+                      <div className="space-y-4 pt-4 border-t border-neutral-900">
+                        <div className="flex items-center justify-between pb-1 border-b border-neutral-850">
+                          <span className="font-semibold text-white text-xs uppercase tracking-wide">Visual Filters</span>
+                          <button
+                            onClick={resetClipFilters}
+                            className="text-[10px] font-semibold text-blue-500 hover:text-blue-400 transition-colors uppercase tracking-wide"
+                          >
+                            Reset
+                          </button>
+                        </div>
+
+                        {/* Brightness */}
+                        <div className="space-y-1.5">
+                          <div className="flex justify-between text-[10px] text-neutral-500 font-sans">
+                            <span>Brightness</span>
+                            <span className="font-mono text-neutral-400">{selectedClip.brightness ?? 100}%</span>
+                          </div>
+                          <input
+                            type="range"
+                            min="0"
+                            max="200"
+                            value={selectedClip.brightness ?? 100}
+                            onChange={(e) => updateClipFilterVal("brightness", e.target.value)}
+                            className="w-full h-1 bg-neutral-800 rounded-lg appearance-none cursor-pointer accent-blue-500"
+                          />
+                        </div>
+
+                        {/* Contrast */}
+                        <div className="space-y-1.5">
+                          <div className="flex justify-between text-[10px] text-neutral-500 font-sans">
+                            <span>Contrast</span>
+                            <span className="font-mono text-neutral-400">{selectedClip.contrast ?? 100}%</span>
+                          </div>
+                          <input
+                            type="range"
+                            min="0"
+                            max="200"
+                            value={selectedClip.contrast ?? 100}
+                            onChange={(e) => updateClipFilterVal("contrast", e.target.value)}
+                            className="w-full h-1 bg-neutral-800 rounded-lg appearance-none cursor-pointer accent-blue-500"
+                          />
+                        </div>
+
+                        {/* Saturation */}
+                        <div className="space-y-1.5">
+                          <div className="flex justify-between text-[10px] text-neutral-500 font-sans">
+                            <span>Saturation</span>
+                            <span className="font-mono text-neutral-400">{selectedClip.saturate ?? 100}%</span>
+                          </div>
+                          <input
+                            type="range"
+                            min="0"
+                            max="200"
+                            value={selectedClip.saturate ?? 100}
+                            onChange={(e) => updateClipFilterVal("saturate", e.target.value)}
+                            className="w-full h-1 bg-neutral-800 rounded-lg appearance-none cursor-pointer accent-blue-500"
+                          />
+                        </div>
+
+                        {/* Hue Rotate */}
+                        <div className="space-y-1.5">
+                          <div className="flex justify-between text-[10px] text-neutral-500 font-sans">
+                            <span>Hue Rotate</span>
+                            <span className="font-mono text-neutral-400">{selectedClip.hueRotate ?? 0}°</span>
+                          </div>
+                          <input
+                            type="range"
+                            min="0"
+                            max="360"
+                            value={selectedClip.hueRotate ?? 0}
+                            onChange={(e) => updateClipFilterVal("hueRotate", e.target.value)}
+                            className="w-full h-1 bg-neutral-850 rounded-lg appearance-none cursor-pointer accent-blue-500"
+                          />
+                        </div>
+
+                        {/* Blur */}
+                        <div className="space-y-1.5">
+                          <div className="flex justify-between text-[10px] text-neutral-500 font-sans">
+                            <span>Blur Radius</span>
+                            <span className="font-mono text-neutral-400">{selectedClip.blur ?? 0}px</span>
+                          </div>
+                          <input
+                            type="range"
+                            min="0"
+                            max="20"
+                            value={selectedClip.blur ?? 0}
+                            onChange={(e) => updateClipFilterVal("blur", e.target.value)}
+                            className="w-full h-1 bg-neutral-850 rounded-lg appearance-none cursor-pointer accent-blue-500"
+                          />
+                        </div>
+                      </div>
+                    )}
+
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <style>{`
+              /* Slate scrollbar styles (Standard) */
+              * {
+                scrollbar-color: #27272a #08080a;
+                scrollbar-width: thin;
+              }
+
+              /* Legacy fallback for WebKit/Blink browsers */
+              @supports not (scrollbar-color: auto) {
+                ::-webkit-scrollbar {
+                  height: 8px;
+                  width: 8px;
+                }
+                ::-webkit-scrollbar-track {
+                  background: #08080a;
+                }
+                ::-webkit-scrollbar-thumb {
+                  background: #27272a;
+                  border-radius: 9999px;
+                }
+                ::-webkit-scrollbar-thumb:hover {
+                  background: #3f3f46;
+                }
+              }
+
+              /* Custom track container styles */
+              [ref="tracksContainerRef"] {
+                overflow-x: hidden;
+              }
+            `}</style>
+          </div>
+        );
+      }
+
+      const root = createRoot(document.getElementById("root"));
+      root.render(<WebVideoEditor />);
+    </script>
+  </body>
+</html>
